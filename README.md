@@ -42,6 +42,18 @@ personal projects like this. Every time you tap "Run scan" it pulls fresh
 Yahoo Finance data live.
 
 ## Notes & tips
+- Results are now saved to `last_scan.json` after every scan and auto-loaded
+  when you reopen or refresh the page, so you don't need to re-scan just to
+  look at your last results again. You'll see a "Showing saved results from…"
+  timestamp at the top when this happens.
+- **Caveat on Streamlit Community Cloud (free tier):** the app's storage is
+  tied to its running container. It survives normal page refreshes and
+  revisits just fine, but if the app goes to sleep from inactivity and later
+  restarts, that file resets and you'll need to run a fresh scan. If you
+  want results to survive indefinitely across restarts too, the next step
+  would be pointing `save_results`/`load_results` at a small external store
+  (e.g. a GitHub Gist, or a free cloud database) instead of the local file —
+  happy to add that if it matters to you.
 - Ticker list is cached for 24h, and price/market cap results are cached for
   15–30 minutes, so re-running the scan shortly after is much faster.
 - Yahoo Finance may occasionally rate-limit large batch requests. If a scan

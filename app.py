@@ -16,6 +16,9 @@ URL in your Android browser and use "Add to Home Screen" for an app-like icon.
 
 import time
 import io
+import json
+import os
+from datetime import datetime, timezone
 import requests
 import pandas as pd
 import numpy as np
@@ -24,6 +27,34 @@ import yfinance as yf
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Reversal Scanner", layout="wide", page_icon="📈")
+
+# ----------------------------------------------------------------------------
+# Persistence: save the last scan to disk so a page refresh / new visit
+# doesn't force a full market re-scan.
+# ----------------------------------------------------------------------------
+RESULTS_FILE = "last_scan.json"
+
+
+def save_results(df, rules):
+    payload = {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "rules": rules,
+        "results": df.to_dict(orient="records"),
+    }
+    with open(RESULTS_FILE, "w") as f:
+        json.dump(payload, f)
+
+
+def load_results():
+    if not os.path.exists(RESULTS_FILE):
+        return None, None, None
+    try:
+        with open(RESULTS_FILE, "r") as f:
+            payload = json.load(f)
+        df = pd.DataFrame(payload["results"])
+        return df, payload["saved_at"], payload["rules"]
+    except Exception:
+        return None, None, None
 
 # ----------------------------------------------------------------------------
 # Universe: full NASDAQ + NYSE common-stock list (from Nasdaq Trader FTP feed)
@@ -182,8 +213,13 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+# Load the last saved scan from disk on first load of this session
+# (e.g. after a page refresh) instead of forcing a re-scan.
 if "results" not in st.session_state:
-    st.session_state.results = None
+    saved_df, saved_at, saved_rules = load_results()
+    st.session_state.results = saved_df
+    st.session_state.saved_at = saved_at
+    st.session_state.saved_rules = saved_rules
 
 if run:
     with st.spinner("Loading NASDAQ + NYSE ticker list..."):
@@ -201,8 +237,16 @@ if run:
     )
     progress.empty()
 
+    rules_used = {
+        "require_red_yesterday": require_red_yesterday,
+        "min_today_pct": min_today_pct,
+        "min_market_cap_b": min_market_cap_b,
+        "exchanges": exchanges,
+    }
+
     if matches.empty:
         st.session_state.results = pd.DataFrame()
+        save_results(pd.DataFrame(), rules_used)
     else:
         with st.spinner(f"Checking market cap for {len(matches)} candidates..."):
             caps = get_market_caps(matches["symbol"].tolist())
@@ -212,11 +256,20 @@ if run:
         matches["market_cap_b"] = (matches["market_cap"] / 1e9).round(2)
         matches = matches.sort_values("today_pct", ascending=False).reset_index(drop=True)
         st.session_state.results = matches
+        save_results(matches, rules_used)
+
+    st.session_state.saved_at = datetime.now(timezone.utc).isoformat()
+    st.session_state.saved_rules = rules_used
 
 # ----------------------------------------------------------------------------
 # Results
 # ----------------------------------------------------------------------------
 results = st.session_state.results
+
+if results is not None and not results.empty and st.session_state.get("saved_at"):
+    saved_dt = datetime.fromisoformat(st.session_state.saved_at)
+    local_str = saved_dt.strftime("%Y-%m-%d %H:%M UTC")
+    st.caption(f"🕒 Showing saved results from **{local_str}**. Tap **Run scan** to refresh.")
 
 if results is not None:
     if results.empty:
