@@ -42,7 +42,14 @@ personal projects like this. Every time you tap "Run scan" it pulls fresh
 Yahoo Finance data live.
 
 ## Notes & tips
-- Results are now saved to `last_scan.json` after every scan and auto-loaded
+- All matching charts now render in one scrollable "waterfall" list below the
+  results table — no need to pick a ticker from a dropdown. Each chart shows
+  the key stats (yesterday %, today %, market cap, last price) above it.
+- Charts are locked: zoom, pan, and drag are disabled, so scrolling past them
+  on a phone won't accidentally pinch-zoom or drag the candlesticks. Hover
+  tooltips still work.
+- Volume is no longer shown under each chart, to keep things compact.
+- Results are saved to `last_scan.json` after every scan and auto-loaded
   when you reopen or refresh the page, so you don't need to re-scan just to
   look at your last results again. You'll see a "Showing saved results from…"
   timestamp at the top when this happens.

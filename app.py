@@ -291,13 +291,38 @@ if results is not None:
         )
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        st.subheader("Chart")
-        selected = st.selectbox("Select a ticker to view its chart", results["symbol"].tolist())
+        st.subheader(f"Charts ({len(results)})")
+        st.caption("Charts are locked (no pinch-zoom/drag) so scrolling on mobile won't accidentally zoom them.")
 
-        if selected:
-            hist = get_history(selected)
+        # Plotly config: disable zoom/pan/scroll-zoom entirely, and hide the
+        # mode bar, so scrolling past a chart on a phone can't accidentally
+        # trigger a zoom or drag gesture.
+        LOCKED_CONFIG = {
+            "displayModeBar": False,
+            "scrollZoom": False,
+            "doubleClick": False,
+            "showAxisDragHandles": False,
+            "staticPlot": False,  # keep hover tooltips working
+        }
+
+        for _, row in results.iterrows():
+            symbol = row["symbol"]
+            name = row.get("name", "")
+            header = f"{symbol} — {name}" if isinstance(name, str) and name else symbol
+            st.markdown(
+                f"**{header}**  \n"
+                f"Yesterday: {row['yesterday_pct']:+.2f}% · Today: {row['today_pct']:+.2f}% · "
+                f"Mkt Cap: ${row.get('market_cap_b', float('nan')):.1f}B · Last: ${row['last_close']:.2f}"
+            )
+
+            hist = get_history(symbol)
             if isinstance(hist.columns, pd.MultiIndex):
                 hist.columns = hist.columns.get_level_values(0)
+
+            if hist.empty:
+                st.warning(f"No chart data available for {symbol}.")
+                continue
+
             fig = go.Figure()
             fig.add_trace(
                 go.Candlestick(
@@ -306,19 +331,18 @@ if results is not None:
                     high=hist["High"],
                     low=hist["Low"],
                     close=hist["Close"],
-                    name=selected,
+                    name=symbol,
                 )
             )
             fig.update_layout(
-                title=f"{selected} — 6 month chart",
                 xaxis_rangeslider_visible=False,
-                height=550,
-                margin=dict(l=10, r=10, t=40, b=10),
+                height=275,
+                margin=dict(l=10, r=10, t=10, b=10),
+                dragmode=False,
             )
-            st.plotly_chart(fig, use_container_width=True)
-
-            vol_fig = go.Figure(go.Bar(x=hist.index, y=hist["Volume"]))
-            vol_fig.update_layout(title="Volume", height=200, margin=dict(l=10, r=10, t=30, b=10))
-            st.plotly_chart(vol_fig, use_container_width=True)
+            fig.update_xaxes(fixedrange=True)
+            fig.update_yaxes(fixedrange=True)
+            st.plotly_chart(fig, use_container_width=True, config=LOCKED_CONFIG)
+            st.divider()
 else:
     st.info("Set your rules on the left and tap **Run scan**.")
