@@ -23,6 +23,7 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 import plotly.graph_objects as go
 
@@ -190,6 +191,80 @@ def get_history(symbol, period="6mo"):
     return yf.download(symbol, period=period, interval="1d", progress=False, auto_adjust=False)
 
 
+def build_smart_zoom_chart_html(hist, symbol, height=275):
+    """A candlestick chart where dragging/pinching only zooms the TIME (x)
+    axis. The y-axis is not user-zoomable directly, but is automatically
+    recalculated to fit the min/max of whatever candles are currently
+    visible — so you never end up zoomed into a blank chart. Double-tap
+    resets back to the full range."""
+    x = [d.strftime("%Y-%m-%d") for d in hist.index]
+    o = [round(float(v), 4) for v in hist["Open"]]
+    h = [round(float(v), 4) for v in hist["High"]]
+    l = [round(float(v), 4) for v in hist["Low"]]
+    c = [round(float(v), 4) for v in hist["Close"]]
+    data_json = json.dumps({"x": x, "o": o, "h": h, "l": l, "c": c})
+    div_id = f"chart_{symbol}_{abs(hash(symbol)) % 100000}"
+
+    return f"""
+    <div id="{div_id}" style="width:100%;height:{height}px;"></div>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <script>
+    (function() {{
+        var d = {data_json};
+        var trace = {{
+            x: d.x, open: d.o, high: d.h, low: d.l, close: d.c,
+            type: 'candlestick', name: '{symbol}',
+            increasing: {{line: {{color: '#26a69a'}}}},
+            decreasing: {{line: {{color: '#ef5350'}}}}
+        }};
+        var fullMin = Math.min.apply(null, d.l);
+        var fullMax = Math.max.apply(null, d.h);
+        var pad = (fullMax - fullMin) * 0.05 || 1;
+        var fullRange = [fullMin - pad, fullMax + pad];
+
+        var layout = {{
+            margin: {{l: 45, r: 10, t: 10, b: 30}},
+            height: {height},
+            xaxis: {{rangeslider: {{visible: false}}, fixedrange: false}},
+            yaxis: {{fixedrange: true, range: fullRange, autorange: false}},
+            dragmode: 'zoom',
+            showlegend: false
+        }};
+        var config = {{
+            displayModeBar: false,
+            scrollZoom: true,
+            doubleClick: 'reset'
+        }};
+
+        var gd = document.getElementById('{div_id}');
+        Plotly.newPlot(gd, [trace], layout, config).then(function() {{
+            gd.on('plotly_relayout', function(ev) {{
+                // Double-tap / reset: restore full y-range too.
+                if (ev['xaxis.autorange']) {{
+                    Plotly.relayout(gd, {{'yaxis.range': fullRange}});
+                    return;
+                }}
+                var x0 = ev['xaxis.range[0]'], x1 = ev['xaxis.range[1]'];
+                if (x0 === undefined || x1 === undefined) return;
+                var lo = Infinity, hi = -Infinity;
+                for (var i = 0; i < d.x.length; i++) {{
+                    if (d.x[i] >= x0 && d.x[i] <= x1) {{
+                        if (d.l[i] < lo) lo = d.l[i];
+                        if (d.h[i] > hi) hi = d.h[i];
+                    }}
+                }}
+                if (isFinite(lo) && isFinite(hi)) {{
+                    var p = (hi - lo) * 0.08 || 1;
+                    Plotly.relayout(gd, {{'yaxis.range': [lo - p, hi + p]}});
+                }}
+            }});
+        }});
+    }})();
+    </script>
+    """
+
+
+
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
@@ -292,18 +367,7 @@ if results is not None:
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         st.subheader(f"Charts ({len(results)})")
-        st.caption("Charts are locked (no pinch-zoom/drag) so scrolling on mobile won't accidentally zoom them.")
-
-        # Plotly config: disable zoom/pan/scroll-zoom entirely, and hide the
-        # mode bar, so scrolling past a chart on a phone can't accidentally
-        # trigger a zoom or drag gesture.
-        LOCKED_CONFIG = {
-            "displayModeBar": False,
-            "scrollZoom": False,
-            "doubleClick": False,
-            "showAxisDragHandles": False,
-            "staticPlot": False,  # keep hover tooltips working
-        }
+        st.caption("Drag or pinch to zoom in on time — the price axis auto-fits to what's visible. Double-tap to reset.")
 
         for _, row in results.sort_values("market_cap_b", ascending=False).iterrows():
             symbol = row["symbol"]
@@ -323,26 +387,7 @@ if results is not None:
                 st.warning(f"No chart data available for {symbol}.")
                 continue
 
-            fig = go.Figure()
-            fig.add_trace(
-                go.Candlestick(
-                    x=hist.index,
-                    open=hist["Open"],
-                    high=hist["High"],
-                    low=hist["Low"],
-                    close=hist["Close"],
-                    name=symbol,
-                )
-            )
-            fig.update_layout(
-                xaxis_rangeslider_visible=False,
-                height=275,
-                margin=dict(l=10, r=10, t=10, b=10),
-                dragmode=False,
-            )
-            fig.update_xaxes(fixedrange=True)
-            fig.update_yaxes(fixedrange=True)
-            st.plotly_chart(fig, use_container_width=True, config=LOCKED_CONFIG)
+            components.html(build_smart_zoom_chart_html(hist, symbol, height=275), height=300, scrolling=False)
             st.divider()
 else:
     st.info("Set your rules on the left and tap **Run scan**.")
