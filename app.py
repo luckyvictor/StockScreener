@@ -23,7 +23,6 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
-import streamlit.components.v1 as components
 import yfinance as yf
 import plotly.graph_objects as go
 
@@ -105,10 +104,13 @@ def chunk(lst, size):
         yield lst[i : i + size]
 
 
-def scan_prices(tickers, min_today_pct, require_red_yesterday, batch_size=150, progress_cb=None):
-    """Batch-download 5 days of daily bars and find tickers where yesterday's
-    close < prior close (red day) and today's close is up >= min_today_pct%
-    versus yesterday's close. Returns a DataFrame of matches with raw % moves."""
+def scan_prices(tickers, min_today_pct, require_red_yesterday, min_close_position, batch_size=150, progress_cb=None):
+    """Batch-download 5 days of daily bars and find tickers where:
+    - yesterday's close < yesterday's open (a red candle), and
+    - today's close is up >= min_today_pct% vs. yesterday's close, and
+    - today's close sits at least min_close_position (0-1) of the way up
+      today's low-to-high range, so a weak/wicky bullish candle doesn't count.
+    Returns a DataFrame of matches with raw % moves."""
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
@@ -138,12 +140,15 @@ def scan_prices(tickers, min_today_pct, require_red_yesterday, batch_size=150, p
                         sub = data[t]
                     closes = sub["Close"].dropna()
                     opens = sub["Open"].dropna()
+                    highs = sub["High"].dropna()
+                    lows = sub["Low"].dropna()
                     vols = sub["Volume"].dropna()
-                    if len(closes) < 2 or len(opens) < 2:
+                    if len(closes) < 2 or len(opens) < 2 or len(highs) < 1 or len(lows) < 1:
                         continue
                     c_today, c_yesterday = closes.iloc[-1], closes.iloc[-2]
                     o_yesterday = opens.iloc[-2]
-                    if pd.isna(c_today) or pd.isna(c_yesterday) or pd.isna(o_yesterday):
+                    h_today, l_today = highs.iloc[-1], lows.iloc[-1]
+                    if pd.isna(c_today) or pd.isna(c_yesterday) or pd.isna(o_yesterday) or pd.isna(h_today) or pd.isna(l_today):
                         continue
 
                     # "Down yesterday" = a red candle: yesterday's close < yesterday's open
@@ -154,12 +159,22 @@ def scan_prices(tickers, min_today_pct, require_red_yesterday, batch_size=150, p
                     yesterday_ok = (c_yesterday < o_yesterday) if require_red_yesterday else True
                     today_ok = today_pct >= min_today_pct
 
-                    if yesterday_ok and today_ok:
+                    # Reject weak bullish candles: close must sit high up in
+                    # today's low-to-high range, not just barely above the low.
+                    today_range = h_today - l_today
+                    if today_range > 0:
+                        close_position = (c_today - l_today) / today_range
+                    else:
+                        close_position = 1.0  # no range (open=high=low=close): treat as fully at the top
+                    close_position_ok = close_position >= min_close_position
+
+                    if yesterday_ok and today_ok and close_position_ok:
                         matches.append(
                             {
                                 "symbol": t,
                                 "yesterday_pct": round(yesterday_pct, 2),
                                 "today_pct": round(today_pct, 2),
+                                "close_position_pct": round(close_position * 100, 1),
                                 "last_close": round(float(c_today), 2),
                                 "volume": int(vols.iloc[-1]) if len(vols) else np.nan,
                             }
@@ -190,81 +205,6 @@ def get_market_caps(symbols):
 def get_history(symbol, period="6mo"):
     return yf.download(symbol, period=period, interval="1d", progress=False, auto_adjust=False)
 
-
-def build_smart_zoom_chart_html(hist, symbol, height=275):
-    """A candlestick chart where dragging/pinching only zooms the TIME (x)
-    axis. The y-axis is not user-zoomable directly, but is automatically
-    recalculated to fit the min/max of whatever candles are currently
-    visible — so you never end up zoomed into a blank chart. Double-tap
-    resets back to the full range."""
-    x = [d.strftime("%Y-%m-%d") for d in hist.index]
-    o = [round(float(v), 4) for v in hist["Open"]]
-    h = [round(float(v), 4) for v in hist["High"]]
-    l = [round(float(v), 4) for v in hist["Low"]]
-    c = [round(float(v), 4) for v in hist["Close"]]
-    data_json = json.dumps({"x": x, "o": o, "h": h, "l": l, "c": c})
-    div_id = f"chart_{symbol}_{abs(hash(symbol)) % 100000}"
-
-    return f"""
-    <div id="{div_id}" style="width:100%;height:{height}px;"></div>
-    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
-    <script>
-    (function() {{
-        var d = {data_json};
-        var trace = {{
-            x: d.x, open: d.o, high: d.h, low: d.l, close: d.c,
-            type: 'candlestick', name: '{symbol}',
-            increasing: {{line: {{color: '#26a69a'}}}},
-            decreasing: {{line: {{color: '#ef5350'}}}}
-        }};
-        var fullMin = Math.min.apply(null, d.l);
-        var fullMax = Math.max.apply(null, d.h);
-        var pad = (fullMax - fullMin) * 0.05 || 1;
-        var fullRange = [fullMin - pad, fullMax + pad];
-
-        var layout = {{
-            margin: {{l: 45, r: 10, t: 10, b: 30}},
-            height: {height},
-            xaxis: {{rangeslider: {{visible: false}}, fixedrange: false}},
-            yaxis: {{fixedrange: true, range: fullRange, autorange: false}},
-            dragmode: 'zoom',
-            showlegend: false
-        }};
-        var config = {{
-            displayModeBar: false,
-            scrollZoom: true,
-            doubleClick: 'reset'
-        }};
-
-        var gd = document.getElementById('{div_id}');
-        Plotly.newPlot(gd, [trace], layout, config).then(function() {{
-            gd.on('plotly_relayout', function(ev) {{
-                // Double-tap / reset: restore full y-range too.
-                if (ev['xaxis.autorange']) {{
-                    Plotly.relayout(gd, {{'yaxis.range': fullRange}});
-                    return;
-                }}
-                var x0 = ev['xaxis.range[0]'], x1 = ev['xaxis.range[1]'];
-                if (x0 === undefined || x1 === undefined) return;
-                var lo = Infinity, hi = -Infinity;
-                for (var i = 0; i < d.x.length; i++) {{
-                    if (d.x[i] >= x0 && d.x[i] <= x1) {{
-                        if (d.l[i] < lo) lo = d.l[i];
-                        if (d.h[i] > hi) hi = d.h[i];
-                    }}
-                }}
-                if (isFinite(lo) && isFinite(hi)) {{
-                    var p = (hi - lo) * 0.08 || 1;
-                    Plotly.relayout(gd, {{'yaxis.range': [lo - p, hi + p]}});
-                }}
-            }});
-        }});
-    }})();
-    </script>
-    """
-
-
-
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
@@ -275,6 +215,12 @@ with st.sidebar:
     st.header("Scan rules")
     require_red_yesterday = st.checkbox("Yesterday must be down (red)", value=True)
     min_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=2.0, step=0.5)
+    min_close_position_pct = st.number_input(
+        "Min close position within today's range (%)",
+        min_value=0.0, max_value=100.0, value=60.0, step=5.0,
+        help="Today's close must sit at least this far up today's low-to-high range, "
+             "so a weak bullish candle with a long upper wick doesn't count.",
+    )
     min_market_cap_b = st.number_input("Minimum market cap ($B)", min_value=0.0, value=10.0, step=1.0)
 
     st.header("Universe")
@@ -308,6 +254,7 @@ if run:
         tickers,
         min_today_pct=min_today_pct,
         require_red_yesterday=require_red_yesterday,
+        min_close_position=min_close_position_pct / 100.0,
         progress_cb=lambda p: progress.progress(p),
     )
     progress.empty()
@@ -315,6 +262,7 @@ if run:
     rules_used = {
         "require_red_yesterday": require_red_yesterday,
         "min_today_pct": min_today_pct,
+        "min_close_position_pct": min_close_position_pct,
         "min_market_cap_b": min_market_cap_b,
         "exchanges": exchanges,
     }
@@ -351,7 +299,7 @@ if results is not None:
         st.info("No matches found with the current rules.")
     else:
         st.success(f"Found {len(results)} match(es).")
-        display_cols = ["symbol", "name", "exchange", "yesterday_pct", "today_pct", "market_cap_b", "last_close", "volume"]
+        display_cols = ["symbol", "name", "exchange", "yesterday_pct", "today_pct", "close_position_pct", "market_cap_b", "last_close", "volume"]
         display_df = results[display_cols].rename(
             columns={
                 "symbol": "Ticker",
@@ -359,6 +307,7 @@ if results is not None:
                 "exchange": "Exchange",
                 "yesterday_pct": "Yesterday % (Open→Close)",
                 "today_pct": "Today %",
+                "close_position_pct": "Close Position %",
                 "market_cap_b": "Mkt Cap ($B)",
                 "last_close": "Last Close",
                 "volume": "Volume",
@@ -367,7 +316,18 @@ if results is not None:
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         st.subheader(f"Charts ({len(results)})")
-        st.caption("Drag or pinch to zoom in on time — the price axis auto-fits to what's visible. Double-tap to reset.")
+        st.caption("Charts are locked (no pinch-zoom/drag) so scrolling on mobile won't accidentally zoom them.")
+
+        # Plotly config: disable zoom/pan/scroll-zoom entirely, and hide the
+        # mode bar, so scrolling past a chart on a phone can't accidentally
+        # trigger a zoom or drag gesture.
+        LOCKED_CONFIG = {
+            "displayModeBar": False,
+            "scrollZoom": False,
+            "doubleClick": False,
+            "showAxisDragHandles": False,
+            "staticPlot": False,  # keep hover tooltips working
+        }
 
         for _, row in results.sort_values("market_cap_b", ascending=False).iterrows():
             symbol = row["symbol"]
@@ -387,7 +347,26 @@ if results is not None:
                 st.warning(f"No chart data available for {symbol}.")
                 continue
 
-            components.html(build_smart_zoom_chart_html(hist, symbol, height=275), height=300, scrolling=False)
+            fig = go.Figure()
+            fig.add_trace(
+                go.Candlestick(
+                    x=hist.index,
+                    open=hist["Open"],
+                    high=hist["High"],
+                    low=hist["Low"],
+                    close=hist["Close"],
+                    name=symbol,
+                )
+            )
+            fig.update_layout(
+                xaxis_rangeslider_visible=False,
+                height=275,
+                margin=dict(l=10, r=10, t=10, b=10),
+                dragmode=False,
+            )
+            fig.update_xaxes(fixedrange=True)
+            fig.update_yaxes(fixedrange=True)
+            st.plotly_chart(fig, use_container_width=True, config=LOCKED_CONFIG)
             st.divider()
 else:
     st.info("Set your rules on the left and tap **Run scan**.")
