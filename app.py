@@ -305,7 +305,7 @@ if results is not None:
             "staticPlot": False,  # keep hover tooltips working
         }
 
-        for _, row in results.iterrows():
+        for _, row in results.sort_values("market_cap_b", ascending=False).iterrows():
             symbol = row["symbol"]
             name = row.get("name", "")
             header = f"{symbol} — {name}" if isinstance(name, str) and name else symbol
