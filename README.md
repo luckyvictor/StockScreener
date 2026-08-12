@@ -1,20 +1,23 @@
 # Reversal Scanner
 
-Scans every NASDAQ + NYSE common stock via Yahoo Finance data and finds
-stocks that had a **red candle yesterday** (close < open) and are **up X%
-today** (default 2%, measured close-to-close), with a minimum market cap
-filter (default $10B). Click any result for an instant candlestick + volume
-chart.
+Scans all NASDAQ + NYSE common stocks via Yahoo Finance data and finds
+stocks that:
+- had a **red candle yesterday** (close < open), and
+- are **up X% today** (default 2%, measured close-to-close), and
+- today's close sits in the **top portion of today's candle** (default: at
+  least 60% of the way up the low-to-high range), so a weak bullish candle
+  with a big upper wick doesn't count.
 
-Rules are adjustable in the sidebar — nothing is hardcoded except the
+Only stocks at or above a minimum market cap (default $10B) are considered.
+All rules are adjustable in the sidebar — nothing is hardcoded except the
 defaults, which match what you asked for.
 
 ## How it works (fast, in two passes)
 1. Pulls the full current list of NASDAQ/NYSE common stock tickers
    (~6,000–7,000 symbols) from the official Nasdaq Trader symbol directory.
 2. Batch-downloads recent daily price bars for all of them and filters for
-   your price-action rule — this is the expensive step, usually 2–6 minutes
-   for the full market.
+   your price-action rules — this is the expensive step, usually a few
+   minutes for the full market.
 3. Only for the small number of matches, it fetches market cap and drops
    anything under your threshold.
 
@@ -42,27 +45,23 @@ personal projects like this. Every time you tap "Run scan" it pulls fresh
 Yahoo Finance data live.
 
 ## Notes & tips
-- All matching charts now render in one scrollable "waterfall" list below the
-  results table — no need to pick a ticker from a dropdown. Each chart shows
-  the key stats (yesterday %, today %, market cap, last price) above it.
-- Charts are locked: zoom, pan, and drag are disabled, so scrolling past them
-  on a phone won't accidentally pinch-zoom or drag the candlesticks. Hover
-  tooltips still work.
-- Volume is no longer shown under each chart, to keep things compact.
+- All matching charts render in one scrollable "waterfall" list below the
+  results table, sorted largest market cap first — no need to pick a ticker
+  from a dropdown. Each chart has the key stats (yesterday %, today %,
+  market cap, last price) above it.
+- Charts are pulled from Finviz (`chart.ashx`), which already includes
+  moving averages and generally renders better than a hand-rolled chart —
+  nothing is plotted on our end. Each ticker also gets an "Open on Finviz"
+  button for the full interactive page. **Caveat:** this uses an unofficial,
+  undocumented Finviz image endpoint (widely used this way, but not a
+  supported API) — if Finviz ever changes or blocks it, charts may stop
+  loading. Let me know if you'd like a self-plotted fallback added back in.
 - Results are saved to `last_scan.json` after every scan and auto-loaded
   when you reopen or refresh the page, so you don't need to re-scan just to
-  look at your last results again. You'll see a "Showing saved results from…"
-  timestamp at the top when this happens.
-- **Caveat on Streamlit Community Cloud (free tier):** the app's storage is
-  tied to its running container. It survives normal page refreshes and
-  revisits just fine, but if the app goes to sleep from inactivity and later
-  restarts, that file resets and you'll need to run a fresh scan. If you
-  want results to survive indefinitely across restarts too, the next step
-  would be pointing `save_results`/`load_results` at a small external store
-  (e.g. a GitHub Gist, or a free cloud database) instead of the local file —
-  happy to add that if it matters to you.
-- Ticker list is cached for 24h, and price/market cap results are cached for
-  15–30 minutes, so re-running the scan shortly after is much faster.
+  look at your last results again. You'll see a "Showing saved results
+  from…" timestamp at the top when this happens. Note: on Streamlit
+  Community Cloud's free tier, this resets if the app goes fully idle and
+  restarts — normal refreshes and same-day revisits are unaffected.
 - Yahoo Finance may occasionally rate-limit large batch requests. If a scan
   comes back short, just tap "Run scan" again after a minute.
 - To scan only NASDAQ or only NYSE, adjust the "Exchanges" filter in the

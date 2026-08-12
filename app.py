@@ -2,9 +2,9 @@
 US Stock Screener — "Down Yesterday, Up Today" scanner
 --------------------------------------------------------
 Scans all NASDAQ + NYSE common stocks using Yahoo Finance data (via yfinance),
-filters for stocks that closed DOWN yesterday and are UP by at least a chosen
-% today, with an optional minimum market cap filter. Click any result to see
-an instant candlestick chart.
+filters for stocks that had a red candle yesterday and are up by at least a
+chosen % today with a strong close, with a minimum market cap filter. Charts
+are pulled from Finviz (includes moving averages) rather than plotted here.
 
 Run locally:
     streamlit run app.py
@@ -24,7 +24,6 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import yfinance as yf
-import plotly.graph_objects as go
 
 st.set_page_config(page_title="Reversal Scanner", layout="wide", page_icon="📈")
 
@@ -201,9 +200,16 @@ def get_market_caps(symbols):
     return out
 
 
-@st.cache_data(ttl=60 * 15, show_spinner=False)
-def get_history(symbol, period="6mo"):
-    return yf.download(symbol, period=period, interval="1d", progress=False, auto_adjust=False)
+def finviz_urls(symbol):
+    """Finviz's chart.ashx image endpoint renders a daily candlestick chart
+    with moving averages already built in — no need to plot it ourselves.
+    quote.ashx is the full interactive page, for tapping through for more
+    detail. Both are unofficial/undocumented Finviz endpoints commonly used
+    this way; if Finviz ever changes or blocks them, this is the one place
+    to swap back to a self-plotted chart."""
+    chart_img = f"https://finviz.com/chart.ashx?t={symbol}&ty=c&ta=1&p=d&s=l"
+    quote_page = f"https://finviz.com/quote.ashx?t={symbol}"
+    return chart_img, quote_page
 
 # ----------------------------------------------------------------------------
 # UI
@@ -316,18 +322,7 @@ if results is not None:
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         st.subheader(f"Charts ({len(results)})")
-        st.caption("Charts are locked (no pinch-zoom/drag) so scrolling on mobile won't accidentally zoom them.")
-
-        # Plotly config: disable zoom/pan/scroll-zoom entirely, and hide the
-        # mode bar, so scrolling past a chart on a phone can't accidentally
-        # trigger a zoom or drag gesture.
-        LOCKED_CONFIG = {
-            "displayModeBar": False,
-            "scrollZoom": False,
-            "doubleClick": False,
-            "showAxisDragHandles": False,
-            "staticPlot": False,  # keep hover tooltips working
-        }
+        st.caption("Charts are from Finviz (includes moving averages). Tap 'Open on Finviz' for the full interactive version.")
 
         for _, row in results.sort_values("market_cap_b", ascending=False).iterrows():
             symbol = row["symbol"]
@@ -339,34 +334,9 @@ if results is not None:
                 f"Mkt Cap: ${row.get('market_cap_b', float('nan')):.1f}B · Last: ${row['last_close']:.2f}"
             )
 
-            hist = get_history(symbol)
-            if isinstance(hist.columns, pd.MultiIndex):
-                hist.columns = hist.columns.get_level_values(0)
-
-            if hist.empty:
-                st.warning(f"No chart data available for {symbol}.")
-                continue
-
-            fig = go.Figure()
-            fig.add_trace(
-                go.Candlestick(
-                    x=hist.index,
-                    open=hist["Open"],
-                    high=hist["High"],
-                    low=hist["Low"],
-                    close=hist["Close"],
-                    name=symbol,
-                )
-            )
-            fig.update_layout(
-                xaxis_rangeslider_visible=False,
-                height=275,
-                margin=dict(l=10, r=10, t=10, b=10),
-                dragmode=False,
-            )
-            fig.update_xaxes(fixedrange=True)
-            fig.update_yaxes(fixedrange=True)
-            st.plotly_chart(fig, use_container_width=True, config=LOCKED_CONFIG)
+            chart_img_url, quote_page_url = finviz_urls(symbol)
+            st.image(chart_img_url, use_container_width=True)
+            st.link_button(f"Open {symbol} on Finviz ↗", quote_page_url, use_container_width=True)
             st.divider()
 else:
     st.info("Set your rules on the left and tap **Run scan**.")
