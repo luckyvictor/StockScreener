@@ -1,60 +1,52 @@
 # Reversal Scanner
 
-Two independent scanners, in separate tabs, both scanning NASDAQ + NYSE
-common stocks via Yahoo Finance data:
+Two layers:
 
-## 📉 Daily Reversal
-Finds stocks that:
-- had a **red candle yesterday** (close < open), and
-- are **up X% today** (default 2%, measured close-to-close), and
-- today's close sits in the **top portion of today's candle** (default: at
-  least 60% of the way up the low-to-high range), so a weak bullish candle
-  with a big upper wick doesn't count.
+## 🏢 Large-cap universe
+The ticker list both scanners use. **The only filter here is market cap**
+(default: greater than $10B). Fetched via Yahoo Finance's own bulk screener
+(a `yfinance` feature — `yf.screen()`/`EquityQuery`), saved to
+`large_cap_universe.json`, and reused every time you open the app — it is
+**not** rebuilt on every scan. Refresh it manually whenever you like via
+the **🔄 Refresh list** button — monthly is plenty, since market cap doesn't
+move fast.
 
-## 📈 1H EMA Crossover
-Finds stocks where the **90-period EMA crossed above the 200-period EMA**
-(a "golden cross") on the **1-hour chart**, within the last N candles
-(default 15). Uses ~3 months of hourly data. Reports how many candles ago
-the crossover happened and the exact timestamp.
+If no list has been saved yet and you run a scanner, it's built
+automatically first (using the threshold currently set in this panel),
+saved, then used for that scan — you don't have to remember to build it
+yourself first.
 
-Both scanners share a minimum market cap filter (default $10B) and let you
-pick which exchanges to include.
+**Fallback:** if Yahoo's screener is ever unavailable (it's an unofficial,
+reverse-engineered API, not a stable documented one), building the list
+falls back automatically to the full NASDAQ+NYSE symbol list from the
+Nasdaq Trader directory, with a market-cap check per ticker — much slower,
+but keeps the app working.
 
-## The large-cap universe is now saved, not re-fetched every scan
-Above the two tabs there's a **"Large-cap universe (shared by both
-scanners)"** panel. It works like this:
+## 📉 Daily Reversal & 📈 1H EMA Crossover
+Both scanners read the saved large-cap list **as-is** and apply only their
+own price-action rules — they do **not** re-check market cap (that's
+already been filtered upstream by the universe layer):
 
-- The first time you tap **Refresh list**, it queries Yahoo Finance's own
-  bulk screener (`yf.screen()`/`EquityQuery` in `yfinance`) for every US
-  stock above your chosen market cap threshold — a handful of API calls,
-  usually done in a few seconds — and **saves the result to
-  `large_cap_universe.json`**.
-- Every time you open the app or run a scan afterward, it's loaded from
-  that saved file automatically. No re-fetch, no re-scan of the whole
-  market, unless you explicitly tap **Refresh list** again.
-- Both scanners check this saved list first. If your scan's market cap
-  threshold and exchange selection are covered by what's saved (e.g. saved
-  at ≥$10B and you scan at ≥$15B — that's just a narrower filter on the same
-  data), it's reused directly with **zero extra API calls**. If you lower
-  the threshold below what was saved, or add an exchange that wasn't
-  included, the app fetches fresh for that one scan (and tells you so) —
-  tap **Refresh list** with your new settings to make that the saved
-  default going forward.
-- Refresh it whenever you like — weekly or monthly is plenty, since market
-  cap doesn't move fast.
+- **Daily Reversal**: red candle yesterday (close < open), up X% today
+  (default 2%, close-to-close), with today's close in the top portion of
+  today's range (default: at least 60% of the way from low to high) so a
+  weak bullish candle with a big upper wick doesn't count.
+- **1H EMA Crossover**: 90-period EMA crosses above the 200-period EMA (a
+  "golden cross") on the hourly chart, within the last N candles (default
+  15). Uses ~3 months of hourly data. Reports how many candles ago the
+  crossover happened and the exact timestamp.
 
-**Caveat:** like scan results, this file lives in the app's own storage.
-It survives normal page refreshes and same-day revisits fine, but on
-Streamlit Community Cloud's free tier, if the app goes fully idle and its
-container restarts, this resets and you'd tap Refresh once to rebuild it
-(a few seconds, not the 30+ minutes a per-ticker approach would take).
+Each scanner's results are saved separately (`last_scan_daily.json` /
+`last_scan_ema.json`) and reload automatically when you reopen or refresh
+the page — no need to re-scan just to see your last results.
 
-If the Yahoo screener call itself fails (it's an unofficial, reverse-
-engineered part of `yfinance`, not a stable documented API), the app falls
-back automatically to the original approach: full NASDAQ+NYSE list from the
-Nasdaq Trader symbol directory, then a market-cap check only on whatever
-price-action matches are found. Each scanner also has a checkbox to force
-that fallback path manually if you'd rather not rely on the screener.
+## Persistence caveat
+Like everything saved in this app, these files live in the app's own
+storage. They survive normal page refreshes and same-day revisits fine,
+but on Streamlit Community Cloud's free tier, if the app goes fully idle
+and its container restarts, saved files reset. For the universe list,
+that just means the next scan rebuilds it automatically (a few seconds via
+the screener, not the tens of minutes a per-ticker approach would take).
 
 ## Run it locally (on a laptop/desktop)
 ```bash
@@ -80,11 +72,8 @@ streamlit run app.py
   is the one line in `finviz_urls()` to revisit.
   This is also an unofficial/undocumented Finviz endpoint in general — if
   Finviz ever changes or blocks it, charts may stop loading.
-- Each scanner's own results are saved separately (`last_scan_daily.json` /
-  `last_scan_ema.json`) and auto-load on refresh, same idea as the
-  large-cap list.
-- The EMA scanner is still slower than the daily one even with the
-  pre-filtered universe, since hourly data per ticker is inherently
+- The EMA scanner is still slower than the daily one even scanning only
+  the pre-filtered universe, since hourly data per ticker is inherently
   heavier than 5 days of daily bars.
 - "Yesterday must be down (red)" checkbox on the Daily Reversal tab lets
   you loosen the rule if you ever want to test up-up momentum instead of a

@@ -1,13 +1,20 @@
 """
-US Stock Screener — two scanners in one app
---------------------------------------------
-1. Daily Reversal: red candle yesterday, up X% today with a strong close.
-2. 1H EMA Crossover: 90 EMA crosses above 200 EMA (golden cross) on the
-   hourly chart within the last N candles.
+US Stock Screener — large-cap universe + two pattern scanners
+----------------------------------------------------------------
+Two-layer design:
+1. Large-cap universe: a list of NASDAQ + NYSE tickers filtered ONLY by
+   market cap (default > $10B), fetched via Yahoo Finance's own bulk
+   screener and saved to disk. You refresh this manually, whenever you
+   want (monthly is plenty — market cap doesn't move fast).
+2. Pattern scanners (Daily Reversal, 1H EMA Crossover) read that saved
+   list as-is and only apply their own price-action rules — they do NOT
+   re-check market cap. If no list has been saved yet, a scanner will
+   build one automatically (using the current market cap threshold shown
+   in the universe panel) before scanning.
 
-Both scan all NASDAQ + NYSE common stocks using Yahoo Finance data (via
-yfinance) and apply a minimum market cap filter. Charts are pulled from
-Finviz rather than plotted here.
+Each scanner's results are saved separately and reload automatically on
+refresh, so nothing needs to be re-run just to look at your last results.
+Charts are pulled from Finviz rather than plotted here.
 
 Run locally:
     streamlit run app.py
@@ -29,12 +36,14 @@ import yfinance as yf
 
 st.set_page_config(page_title="Reversal Scanner", layout="wide", page_icon="📈")
 
+ALL_EXCHANGES = ["NASDAQ", "NYSE", "NYSE American"]
+
 # ----------------------------------------------------------------------------
-# Persistence: save the last scan of each type to disk so a page refresh /
-# new visit doesn't force a re-scan.
+# Persistence: scan results (per scanner) and the large-cap universe.
 # ----------------------------------------------------------------------------
 RESULTS_FILE_DAILY = "last_scan_daily.json"
 RESULTS_FILE_EMA = "last_scan_ema.json"
+LARGE_CAP_FILE = "large_cap_universe.json"
 
 
 def save_results(path, df, rules):
@@ -59,9 +68,6 @@ def load_results(path):
         return None, None, None
 
 
-LARGE_CAP_FILE = "large_cap_universe.json"
-
-
 def save_large_cap_list(df, meta):
     payload = {"meta": meta, "rows": df.to_dict(orient="records")}
     with open(LARGE_CAP_FILE, "w") as f:
@@ -80,57 +86,16 @@ def load_large_cap_list():
         return None, None
 
 
-# ----------------------------------------------------------------------------
-# Universe: full NASDAQ + NYSE common-stock list (from Nasdaq Trader FTP feed)
-# ----------------------------------------------------------------------------
-NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
-
-
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def get_universe():
-    """Return a DataFrame of (symbol, name, exchange) for NASDAQ + NYSE
-    common stocks, excluding ETFs, test issues, warrants, units and rights."""
-    frames = []
-
-    r = requests.get(NASDAQ_LISTED_URL, timeout=30)
-    df = pd.read_csv(io.StringIO(r.text), sep="|")
-    df = df[df["Test Issue"] == "N"]
-    df = df[df["ETF"] == "N"]
-    df = df[~df["Symbol"].str.contains(r"[.$]", regex=True, na=False)]
-    df = df.rename(columns={"Symbol": "symbol", "Security Name": "name"})
-    df["exchange"] = "NASDAQ"
-    frames.append(df[["symbol", "name", "exchange"]])
-
-    r = requests.get(OTHER_LISTED_URL, timeout=30)
-    df2 = pd.read_csv(io.StringIO(r.text), sep="|")
-    df2 = df2[df2["Test Issue"] == "N"]
-    df2 = df2[df2["ETF"] == "N"]
-    df2 = df2[df2["Exchange"].isin(["N", "A"])]
-    df2 = df2[~df2["ACT Symbol"].str.contains(r"[.$]", regex=True, na=False)]
-    df2 = df2.rename(columns={"ACT Symbol": "symbol", "Security Name": "name"})
-    df2["exchange"] = df2["Exchange"].map({"N": "NYSE", "A": "NYSE American"})
-    frames.append(df2[["symbol", "name", "exchange"]])
-
-    out = pd.concat(frames, ignore_index=True).drop_duplicates(subset="symbol")
-    out = out.sort_values("symbol").reset_index(drop=True)
-    return out
-
-
 def chunk(lst, size):
     for i in range(0, len(lst), size):
         yield lst[i : i + size]
 
 
 # ----------------------------------------------------------------------------
-# Fast pre-filter: use Yahoo Finance's own bulk screener (via yfinance) to
-# get only large-cap tickers directly, instead of checking market cap for
-# every one of ~7,000 tickers individually. This is an unofficial/reverse-
-# engineered part of yfinance (yf.screen / EquityQuery talk to Yahoo's
-# internal screener API) — not guaranteed stable, but it stays within the
-# same Yahoo Finance ecosystem the rest of the app already relies on. If it
-# fails or its response fields don't match what's expected, every caller
-# falls back automatically to the slower full-market-scan path.
+# Large-cap universe source #1 (primary): Yahoo's own bulk screener via
+# yfinance. Fast — a handful of API calls instead of thousands. This is an
+# unofficial/reverse-engineered part of yfinance (yf.screen / EquityQuery
+# talk to Yahoo's internal screener API) — not a stable documented API.
 # ----------------------------------------------------------------------------
 YF_EXCHANGE_MAP = {
     "NMS": "NASDAQ", "NGM": "NASDAQ", "NCM": "NASDAQ",  # Nasdaq Global Select / Global Market / Capital Market
@@ -139,11 +104,9 @@ YF_EXCHANGE_MAP = {
 }
 
 
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def get_large_cap_universe(min_cap_b, exchanges):
+def fetch_large_cap_via_screener(min_cap_b):
     """Query Yahoo's screener for US equities with market cap > min_cap_b
-    (in $B), then keep only the requested exchanges. Raises on any failure
-    or empty result so callers can fall back to the full-market path."""
+    (in $B) across ALL_EXCHANGES. Raises on failure/empty result."""
     q = yf.EquityQuery("and", [
         yf.EquityQuery("gt", ["intradaymarketcap", int(min_cap_b * 1e9)]),
         yf.EquityQuery("eq", ["region", "us"]),
@@ -163,7 +126,7 @@ def get_large_cap_universe(min_cap_b, exchanges):
 
         for r in quotes:
             exch_label = YF_EXCHANGE_MAP.get(r.get("exchange"))
-            if exch_label is None or exch_label not in exchanges:
+            if exch_label is None:
                 continue
             cap = r.get("marketCap") or r.get("intradaymarketcap") or r.get("regularMarketCap")
             symbol = r.get("symbol")
@@ -189,47 +152,45 @@ def get_large_cap_universe(min_cap_b, exchanges):
     return df
 
 
-def load_scan_universe(min_cap_b, exchanges, use_screener_key):
-    """Universe resolution order for a scan:
-    1. The saved/shared large-cap list (session_state, loaded from disk at
-       startup) — free, no API call, IF it covers the requested threshold
-       and exchanges.
-    2. A fresh live call to Yahoo's screener (not persisted).
-    3. Full NASDAQ+NYSE fallback.
-    Returns (universe_df, market_cap_known: bool)."""
-    saved_df = st.session_state.get("universe_df")
-    saved_meta = st.session_state.get("universe_meta") or {}
+# ----------------------------------------------------------------------------
+# Large-cap universe source #2 (fallback): full NASDAQ+NYSE symbol list from
+# the Nasdaq Trader FTP feed, then a per-ticker market cap check. Only used
+# if the Yahoo screener call fails — much slower, but keeps the app working.
+# ----------------------------------------------------------------------------
+NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
-    if saved_df is not None and not saved_df.empty:
-        saved_min_cap = saved_meta.get("min_cap_b")
-        saved_exch = set(saved_meta.get("exchanges", []))
-        if saved_min_cap is not None and saved_min_cap <= min_cap_b and saved_exch.issuperset(set(exchanges)):
-            filtered = saved_df[saved_df["exchange"].isin(exchanges) & (saved_df["market_cap_b"] >= min_cap_b)].copy()
-            st.success(f"Using saved large-cap list: {len(filtered):,} tickers with market cap ≥ ${min_cap_b:.0f}B (no re-fetch needed).")
-            return filtered, True
-        else:
-            st.info(
-                f"Saved large-cap list (≥ ${saved_min_cap}B, built for {sorted(saved_exch)}) doesn't cover this "
-                f"scan's threshold/exchanges — fetching fresh for this scan only. Use **Refresh list** above "
-                f"to update the saved list to your current settings."
-            )
 
-    if st.session_state.get(use_screener_key, True):
-        try:
-            universe = get_large_cap_universe(min_cap_b, exchanges)
-            st.success(f"Pre-filtered to {len(universe):,} tickers with market cap ≥ ${min_cap_b:.0f}B via Yahoo's screener.")
-            return universe, True
-        except Exception as e:
-            st.warning(f"Yahoo screener unavailable ({e}) — falling back to a full market scan (slower).")
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def get_full_symbol_list():
+    """Full NASDAQ + NYSE common-stock list, no market cap filter."""
+    frames = []
 
-    universe = get_universe()
-    universe = universe[universe["exchange"].isin(exchanges)].copy()
-    return universe, False
+    r = requests.get(NASDAQ_LISTED_URL, timeout=30)
+    df = pd.read_csv(io.StringIO(r.text), sep="|")
+    df = df[df["Test Issue"] == "N"]
+    df = df[df["ETF"] == "N"]
+    df = df[~df["Symbol"].str.contains(r"[.$]", regex=True, na=False)]
+    df = df.rename(columns={"Symbol": "symbol", "Security Name": "name"})
+    df["exchange"] = "NASDAQ"
+    frames.append(df[["symbol", "name", "exchange"]])
+
+    r = requests.get(OTHER_LISTED_URL, timeout=30)
+    df2 = pd.read_csv(io.StringIO(r.text), sep="|")
+    df2 = df2[df2["Test Issue"] == "N"]
+    df2 = df2[df2["ETF"] == "N"]
+    df2 = df2[df2["Exchange"].isin(["N", "A"])]
+    df2 = df2[~df2["ACT Symbol"].str.contains(r"[.$]", regex=True, na=False)]
+    df2 = df2.rename(columns={"ACT Symbol": "symbol", "Security Name": "name"})
+    df2["exchange"] = df2["Exchange"].map({"N": "NYSE", "A": "NYSE American"})
+    frames.append(df2[["symbol", "name", "exchange"]])
+
+    out = pd.concat(frames, ignore_index=True).drop_duplicates(subset="symbol")
+    return out.sort_values("symbol").reset_index(drop=True)
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_market_caps(symbols):
-    """Fetch market cap for a (small) list of candidate symbols."""
     out = {}
     for s in symbols:
         try:
@@ -238,6 +199,55 @@ def get_market_caps(symbols):
         except Exception:
             out[s] = None
     return out
+
+
+def build_large_cap_universe(min_cap_b):
+    """Try the fast Yahoo-screener path; fall back to the slow full-list +
+    per-ticker market cap check if that fails. Always returns a DataFrame
+    with symbol/name/exchange/market_cap/market_cap_b."""
+    try:
+        return fetch_large_cap_via_screener(min_cap_b), True
+    except Exception as e:
+        st.warning(f"Yahoo screener unavailable ({e}) — falling back to the full market list + per-ticker market cap check (much slower).")
+        full = get_full_symbol_list()
+        symbols = full["symbol"].tolist()
+        caps = {}
+        prog = st.progress(0.0)
+        for i, batch in enumerate(chunk(symbols, 50)):
+            batch_caps = get_market_caps(batch)
+            caps.update(batch_caps)
+            prog.progress(min((i + 1) * 50 / len(symbols), 1.0))
+        prog.empty()
+        full["market_cap"] = full["symbol"].map(caps)
+        full = full[full["market_cap"].fillna(0) >= min_cap_b * 1e9].copy()
+        full["market_cap_b"] = (full["market_cap"] / 1e9).round(2)
+        full = full.sort_values("market_cap", ascending=False).reset_index(drop=True)
+        return full, False
+
+
+def ensure_universe_loaded():
+    """Returns the currently saved/loaded large-cap universe DataFrame.
+    If none is saved yet, builds and saves one automatically using the
+    market cap threshold currently set in the universe panel."""
+    if st.session_state.get("universe_df") is not None and not st.session_state.universe_df.empty:
+        return st.session_state.universe_df, st.session_state.universe_meta
+
+    min_cap_b = st.session_state.get("u_mcap", 10.0)
+    st.info(f"No saved large-cap list yet — building one now (market cap > ${min_cap_b:.0f}B). This only happens once; future scans will reuse the saved list.")
+    with st.spinner("Fetching large-cap list..."):
+        df, via_screener = build_large_cap_universe(min_cap_b)
+    meta = {
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "min_cap_b": min_cap_b,
+        "exchanges": ALL_EXCHANGES,
+        "count": len(df),
+        "via_screener": via_screener,
+    }
+    save_large_cap_list(df, meta)
+    st.session_state.universe_df = df
+    st.session_state.universe_meta = meta
+    st.success(f"Built and saved — {len(df):,} tickers.")
+    return df, meta
 
 
 def finviz_urls(symbol):
@@ -254,7 +264,7 @@ def finviz_urls(symbol):
 
 
 # ----------------------------------------------------------------------------
-# Scanner 1: Daily Reversal
+# Scanner 1: Daily Reversal (pattern rules only — no market cap check here)
 # ----------------------------------------------------------------------------
 def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close_position, batch_size=150, progress_cb=None):
     """Batch-download 5 days of daily bars and find tickers where:
@@ -323,7 +333,7 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
 
 
 # ----------------------------------------------------------------------------
-# Scanner 2: 1H EMA Crossover (golden cross)
+# Scanner 2: 1H EMA Crossover (golden cross) — pattern rules only
 # ----------------------------------------------------------------------------
 def scan_ema_crossover(tickers, lookback_candles, batch_size=100, progress_cb=None):
     """Batch-download hourly bars and find tickers where the 90-period EMA
@@ -403,6 +413,16 @@ def render_charts(results_sorted_df, key_prefix):
         st.divider()
 
 
+def finalize_matches(matches, universe_df, sort_col, sort_asc):
+    """Attach name/exchange/market cap from the universe list (already
+    known — no re-checking) and sort."""
+    matches = matches.merge(
+        universe_df[["symbol", "name", "exchange", "market_cap", "market_cap_b"]],
+        on="symbol", how="left",
+    )
+    return matches.sort_values(sort_col, ascending=sort_asc).reset_index(drop=True)
+
+
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
@@ -410,44 +430,37 @@ st.title("📈 Reversal Scanner")
 st.caption("Scanned from Yahoo Finance data — best used after market close for the daily scanner.")
 
 # ----------------------------------------------------------------------------
-# Shared large-cap universe: fetched via Yahoo's screener and saved to disk,
-# so scans don't need to re-fetch it every time. Refresh it manually
-# whenever you want (weekly/monthly is plenty, since market cap moves slowly).
+# Large-cap universe: the ONLY filter here is market cap. Saved to disk;
+# refresh manually whenever you want (monthly is plenty).
 # ----------------------------------------------------------------------------
 if "universe_df" not in st.session_state:
     df0, meta0 = load_large_cap_list()
     st.session_state.universe_df = df0
     st.session_state.universe_meta = meta0
 
-with st.expander("🏢 Large-cap universe (shared by both scanners)", expanded=(st.session_state.universe_df is None)):
-    u1, u2, u3 = st.columns([2, 2, 1.3])
+with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_df is None)):
+    st.caption("The ticker list used by both scanners below. Filtered ONLY by market cap — refresh this occasionally (e.g. monthly), not every time you scan.")
+    u1, u2 = st.columns([3, 1.3])
     with u1:
         universe_min_cap_b = st.number_input("Market cap threshold ($B)", min_value=0.0, value=10.0, step=1.0, key="u_mcap")
     with u2:
-        universe_exchanges = st.multiselect(
-            "Exchanges", ["NASDAQ", "NYSE", "NYSE American"],
-            default=["NASDAQ", "NYSE", "NYSE American"], key="u_exch",
-        )
-    with u3:
-        st.write("")  # vertical spacer to align button with inputs
+        st.write("")  # vertical spacer to align button with the input
         refresh_clicked = st.button("🔄 Refresh list", use_container_width=True)
 
     if refresh_clicked:
-        try:
-            with st.spinner("Fetching large-cap list from Yahoo's screener..."):
-                fresh_df = get_large_cap_universe(universe_min_cap_b, universe_exchanges)
-            meta = {
-                "built_at": datetime.now(timezone.utc).isoformat(),
-                "min_cap_b": universe_min_cap_b,
-                "exchanges": universe_exchanges,
-                "count": len(fresh_df),
-            }
-            save_large_cap_list(fresh_df, meta)
-            st.session_state.universe_df = fresh_df
-            st.session_state.universe_meta = meta
-            st.success(f"Refreshed — {len(fresh_df):,} tickers saved.")
-        except Exception as e:
-            st.error(f"Couldn't refresh the list ({e}). The previously saved list (if any) is unchanged.")
+        with st.spinner("Fetching large-cap list..."):
+            df, via_screener = build_large_cap_universe(universe_min_cap_b)
+        meta = {
+            "built_at": datetime.now(timezone.utc).isoformat(),
+            "min_cap_b": universe_min_cap_b,
+            "exchanges": ALL_EXCHANGES,
+            "count": len(df),
+            "via_screener": via_screener,
+        }
+        save_large_cap_list(df, meta)
+        st.session_state.universe_df = df
+        st.session_state.universe_meta = meta
+        st.success(f"Refreshed — {len(df):,} tickers saved.")
 
     if st.session_state.universe_df is not None and not st.session_state.universe_df.empty:
         m = st.session_state.universe_meta or {}
@@ -456,38 +469,24 @@ with st.expander("🏢 Large-cap universe (shared by both scanners)", expanded=(
             built_at = datetime.fromisoformat(built_at).strftime("%Y-%m-%d %H:%M UTC")
         except Exception:
             pass
-        st.caption(f"Loaded: **{len(st.session_state.universe_df):,} tickers** · cap ≥ ${m.get('min_cap_b', '?')}B · exchanges: {', '.join(m.get('exchanges', []))} · built {built_at}")
+        st.caption(f"Loaded: **{len(st.session_state.universe_df):,} tickers** · market cap > ${m.get('min_cap_b', '?')}B · built {built_at}")
     else:
-        st.caption("No saved list yet. Set your threshold above and tap **Refresh list** — this uses Yahoo's screener and takes only a few seconds.")
+        st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
 tab_daily, tab_ema = st.tabs(["📉 Daily Reversal", "📈 1H EMA Crossover"])
 
 # ============================== TAB 1: DAILY ================================
 with tab_daily:
-    st.markdown("Finds stocks with a **red candle yesterday**, **up X% today**, closing strong.")
+    st.markdown("Finds stocks with a **red candle yesterday**, **up X% today**, closing strong — scanned from the large-cap universe above.")
 
     with st.expander("⚙️ Rules", expanded=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            require_red_yesterday = st.checkbox("Yesterday must be down (red)", value=True, key="d_red")
-            min_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=2.0, step=0.5, key="d_pct")
-            min_close_position_pct = st.number_input(
-                "Min close position within today's range (%)", min_value=0.0, max_value=100.0, value=60.0, step=5.0,
-                key="d_close_pos",
-                help="Today's close must sit at least this far up today's low-to-high range.",
-            )
-        with c2:
-            min_market_cap_b_d = st.number_input("Minimum market cap ($B)", min_value=0.0, value=10.0, step=1.0, key="d_mcap")
-            exchanges_d = st.multiselect(
-                "Exchanges", ["NASDAQ", "NYSE", "NYSE American"],
-                default=["NASDAQ", "NYSE", "NYSE American"], key="d_exch",
-            )
-            st.checkbox(
-                "Pre-filter market cap via Yahoo's screener (fast, recommended)",
-                value=True, key="d_use_screener",
-                help="Fetches only large-cap tickers upfront instead of checking market cap "
-                     "for the whole market. Falls back automatically if unavailable.",
-            )
+        require_red_yesterday = st.checkbox("Yesterday must be down (red)", value=True, key="d_red")
+        min_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=2.0, step=0.5, key="d_pct")
+        min_close_position_pct = st.number_input(
+            "Min close position within today's range (%)", min_value=0.0, max_value=100.0, value=60.0, step=5.0,
+            key="d_close_pos",
+            help="Today's close must sit at least this far up today's low-to-high range.",
+        )
 
     run_daily = st.button("🔍 Run Daily Reversal scan", type="primary", use_container_width=True, key="run_daily")
 
@@ -497,10 +496,9 @@ with tab_daily:
         st.session_state.daily_saved_at = saved_at0
 
     if run_daily:
-        with st.spinner("Loading ticker universe..."):
-            universe, used_screener = load_scan_universe(min_market_cap_b_d, exchanges_d, "d_use_screener")
+        universe, universe_meta = ensure_universe_loaded()
         tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** tickers for price action...")
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers for price action...")
 
         progress = st.progress(0.0)
         matches = scan_daily_reversal(
@@ -511,25 +509,15 @@ with tab_daily:
 
         rules_used = {
             "require_red_yesterday": require_red_yesterday, "min_today_pct": min_today_pct,
-            "min_close_position_pct": min_close_position_pct, "min_market_cap_b": min_market_cap_b_d,
-            "exchanges": exchanges_d, "used_screener": used_screener,
+            "min_close_position_pct": min_close_position_pct,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
 
         if matches.empty:
             st.session_state.daily_results = pd.DataFrame()
             save_results(RESULTS_FILE_DAILY, pd.DataFrame(), rules_used)
         else:
-            if used_screener:
-                # Market cap is already known from the screener pre-filter — no extra lookups needed.
-                matches = matches.merge(universe[["symbol", "name", "exchange", "market_cap", "market_cap_b"]], on="symbol", how="left")
-            else:
-                with st.spinner(f"Checking market cap for {len(matches)} candidates..."):
-                    caps = get_market_caps(matches["symbol"].tolist())
-                matches["market_cap"] = matches["symbol"].map(caps)
-                matches = matches[matches["market_cap"].fillna(0) >= min_market_cap_b_d * 1e9]
-                matches = matches.merge(universe[["symbol", "name", "exchange"]], on="symbol", how="left")
-                matches["market_cap_b"] = (matches["market_cap"] / 1e9).round(2)
-            matches = matches.sort_values("today_pct", ascending=False).reset_index(drop=True)
+            matches = finalize_matches(matches, universe, sort_col="today_pct", sort_asc=False)
             st.session_state.daily_results = matches
             save_results(RESULTS_FILE_DAILY, matches, rules_used)
 
@@ -560,28 +548,13 @@ with tab_daily:
 
 # ============================== TAB 2: 1H EMA ================================
 with tab_ema:
-    st.markdown("Finds stocks where the **90 EMA crossed above the 200 EMA** (golden cross) on the **1-hour chart**, within the last N candles.")
+    st.markdown("Finds stocks where the **90 EMA crossed above the 200 EMA** (golden cross) on the **1-hour chart**, within the last N candles — scanned from the large-cap universe above.")
 
     with st.expander("⚙️ Rules", expanded=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            lookback_candles = st.number_input(
-                "Crossover must have happened within the last N hourly candles",
-                min_value=1, value=15, step=1, key="e_lookback",
-            )
-        with c2:
-            min_market_cap_b_e = st.number_input("Minimum market cap ($B)", min_value=0.0, value=10.0, step=1.0, key="e_mcap")
-            exchanges_e = st.multiselect(
-                "Exchanges", ["NASDAQ", "NYSE", "NYSE American"],
-                default=["NASDAQ", "NYSE", "NYSE American"], key="e_exch",
-            )
-            st.checkbox(
-                "Pre-filter market cap via Yahoo's screener (fast, recommended)",
-                value=True, key="e_use_screener",
-                help="Fetches only large-cap tickers upfront instead of pulling hourly data "
-                     "for the whole market — this matters a lot here since intraday data is heavy. "
-                     "Falls back automatically if unavailable.",
-            )
+        lookback_candles = st.number_input(
+            "Crossover must have happened within the last N hourly candles",
+            min_value=1, value=15, step=1, key="e_lookback",
+        )
         st.caption("Uses ~3 months of hourly data so the 200-period EMA has enough history to be meaningful.")
 
     run_ema = st.button("🔍 Run 1H EMA Crossover scan", type="primary", use_container_width=True, key="run_ema")
@@ -592,10 +565,9 @@ with tab_ema:
         st.session_state.ema_saved_at = saved_at0
 
     if run_ema:
-        with st.spinner("Loading ticker universe..."):
-            universe, used_screener = load_scan_universe(min_market_cap_b_e, exchanges_e, "e_use_screener")
+        universe, universe_meta = ensure_universe_loaded()
         tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** tickers on the 1H chart for EMA crossovers (this can take a while — hourly data is heavier than daily)...")
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the 1H chart for EMA crossovers (this can take a while — hourly data is heavier than daily)...")
 
         progress = st.progress(0.0)
         matches = scan_ema_crossover(
@@ -603,22 +575,16 @@ with tab_ema:
         )
         progress.empty()
 
-        rules_used = {"lookback_candles": lookback_candles, "min_market_cap_b": min_market_cap_b_e, "exchanges": exchanges_e, "used_screener": used_screener}
+        rules_used = {
+            "lookback_candles": lookback_candles,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
 
         if matches.empty:
             st.session_state.ema_results = pd.DataFrame()
             save_results(RESULTS_FILE_EMA, pd.DataFrame(), rules_used)
         else:
-            if used_screener:
-                matches = matches.merge(universe[["symbol", "name", "exchange", "market_cap", "market_cap_b"]], on="symbol", how="left")
-            else:
-                with st.spinner(f"Checking market cap for {len(matches)} candidates..."):
-                    caps = get_market_caps(matches["symbol"].tolist())
-                matches["market_cap"] = matches["symbol"].map(caps)
-                matches = matches[matches["market_cap"].fillna(0) >= min_market_cap_b_e * 1e9]
-                matches = matches.merge(universe[["symbol", "name", "exchange"]], on="symbol", how="left")
-                matches["market_cap_b"] = (matches["market_cap"] / 1e9).round(2)
-            matches = matches.sort_values("bars_ago", ascending=True).reset_index(drop=True)
+            matches = finalize_matches(matches, universe, sort_col="bars_ago", sort_asc=True)
             st.session_state.ema_results = matches
             save_results(RESULTS_FILE_EMA, matches, rules_used)
 
