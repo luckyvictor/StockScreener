@@ -333,21 +333,24 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
 
 
 # ----------------------------------------------------------------------------
-# Scanner 2: 1H EMA Crossover (golden cross) — pattern rules only
+# Scanner 2: 1H EMA10 > EMA90 with a strong close — pattern rules only
 # ----------------------------------------------------------------------------
-def scan_ema_crossover(tickers, lookback_candles, batch_size=100, progress_cb=None):
-    """Batch-download hourly bars and find tickers where the 90-period EMA
-    crossed above the 200-period EMA (golden cross) within the last
-    `lookback_candles` hourly bars. Reports the most recent such crossover."""
+def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, batch_size=100, progress_cb=None):
+    """Batch-download hourly bars and find tickers where, on some candle
+    within the last `lookback_candles` hourly bars:
+    - the 10-period EMA is above the 90-period EMA (short-term uptrend), AND
+    - that candle's close sits at least min_close_position (0-1) of the way
+      up its own low-to-high range (a strong close, not just drifting up).
+    Reports the most recent such candle."""
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-    min_bars_needed = 200 + 5  # enough history for a stable EMA200 plus a little buffer
+    min_bars_needed = 90 + 20  # enough history for a stable EMA90 plus a little buffer
 
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
-                tickers=" ".join(batch), period="3mo", interval="60m",
+                tickers=" ".join(batch), period="2mo", interval="60m",
                 group_by="ticker", threads=True, progress=False, auto_adjust=False,
             )
         except Exception:
@@ -360,31 +363,38 @@ def scan_ema_crossover(tickers, lookback_candles, batch_size=100, progress_cb=No
                     if sub is None:
                         continue
                     closes = sub["Close"].dropna()
-                    if len(closes) < min_bars_needed:
+                    highs = sub["High"].dropna()
+                    lows = sub["Low"].dropna()
+                    if len(closes) < min_bars_needed or len(highs) < min_bars_needed or len(lows) < min_bars_needed:
                         continue
 
+                    ema10 = closes.ewm(span=10, adjust=False).mean()
                     ema90 = closes.ewm(span=90, adjust=False).mean()
-                    ema200 = closes.ewm(span=200, adjust=False).mean()
-                    diff = ema90 - ema200
-                    n = len(diff)
-                    lookback = min(lookback_candles, n - 1)
+                    n = len(closes)
+                    lookback = min(lookback_candles, n)
                     start = n - lookback
 
-                    cross_idx = None
+                    match_idx = None
+                    match_close_pos = None
                     for idx in range(n - 1, start - 1, -1):
-                        prev, curr = diff.iloc[idx - 1], diff.iloc[idx]
-                        if prev < 0 and curr >= 0:
-                            cross_idx = idx
+                        if ema10.iloc[idx] <= ema90.iloc[idx]:
+                            continue
+                        candle_range = highs.iloc[idx] - lows.iloc[idx]
+                        close_pos = (closes.iloc[idx] - lows.iloc[idx]) / candle_range if candle_range > 0 else 1.0
+                        if close_pos >= min_close_position:
+                            match_idx = idx
+                            match_close_pos = close_pos
                             break
 
-                    if cross_idx is not None:
-                        bars_ago = (n - 1) - cross_idx
+                    if match_idx is not None:
+                        bars_ago = (n - 1) - match_idx
                         matches.append({
                             "symbol": t,
                             "bars_ago": int(bars_ago),
-                            "cross_time": str(closes.index[cross_idx]),
+                            "match_time": str(closes.index[match_idx]),
+                            "close_position_pct": round(match_close_pos * 100, 1),
+                            "ema10_last": round(float(ema10.iloc[-1]), 2),
                             "ema90_last": round(float(ema90.iloc[-1]), 2),
-                            "ema200_last": round(float(ema200.iloc[-1]), 2),
                             "last_close": round(float(closes.iloc[-1]), 2),
                         })
                 except Exception:
@@ -548,16 +558,21 @@ with tab_daily:
 
 # ============================== TAB 2: 1H EMA ================================
 with tab_ema:
-    st.markdown("Finds stocks where the **90 EMA crossed above the 200 EMA** (golden cross) on the **1-hour chart**, within the last N candles — scanned from the large-cap universe above.")
+    st.markdown("Finds stocks where, on some candle in the last N hourly candles, the **10 EMA is above the 90 EMA** and that **candle closed strong** (close near the high) — scanned from the large-cap universe above.")
 
     with st.expander("⚙️ Rules", expanded=True):
         lookback_candles = st.number_input(
-            "Crossover must have happened within the last N hourly candles",
+            "Must have happened within the last N hourly candles",
             min_value=1, value=15, step=1, key="e_lookback",
         )
-        st.caption("Uses ~3 months of hourly data so the 200-period EMA has enough history to be meaningful.")
+        min_ema_close_position_pct = st.number_input(
+            "Min close position within that candle's range (%)",
+            min_value=0.0, max_value=100.0, value=80.0, step=5.0, key="e_close_pos",
+            help="On the matching candle, the close must sit at least this far up that candle's own low-to-high range — a strong close, not just drifting up.",
+        )
+        st.caption("Uses ~2 months of hourly data so the 90-period EMA has enough history to be meaningful.")
 
-    run_ema = st.button("🔍 Run 1H EMA Crossover scan", type="primary", use_container_width=True, key="run_ema")
+    run_ema = st.button("🔍 Run 1H EMA scan", type="primary", use_container_width=True, key="run_ema")
 
     if "ema_results" not in st.session_state:
         df0, saved_at0, rules0 = load_results(RESULTS_FILE_EMA)
@@ -567,16 +582,19 @@ with tab_ema:
     if run_ema:
         universe, universe_meta = ensure_universe_loaded()
         tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the 1H chart for EMA crossovers (this can take a while — hourly data is heavier than daily)...")
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the 1H chart for EMA10>EMA90 with a strong close (this can take a while — hourly data is heavier than daily)...")
 
         progress = st.progress(0.0)
-        matches = scan_ema_crossover(
-            tickers, lookback_candles=lookback_candles, progress_cb=lambda p: progress.progress(p),
+        matches = scan_ema_trend_strong_candle(
+            tickers, lookback_candles=lookback_candles,
+            min_close_position=min_ema_close_position_pct / 100.0,
+            progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
 
         rules_used = {
             "lookback_candles": lookback_candles,
+            "min_close_position_pct": min_ema_close_position_pct,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
 
@@ -601,14 +619,15 @@ with tab_ema:
             st.info("No matches found with the current rules.")
         else:
             st.success(f"Found {len(results_e)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "bars_ago", "cross_time", "ema90_last", "ema200_last", "market_cap_b", "last_close"]
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "close_position_pct", "ema10_last", "ema90_last", "market_cap_b", "last_close"]
             display_df = results_e[display_cols].rename(columns={
                 "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
-                "bars_ago": "Candles Ago", "cross_time": "Crossover Time (UTC)",
-                "ema90_last": "EMA90 (now)", "ema200_last": "EMA200 (now)",
+                "bars_ago": "Candles Ago", "match_time": "Match Time (UTC)",
+                "close_position_pct": "Close Position %",
+                "ema10_last": "EMA10 (now)", "ema90_last": "EMA90 (now)",
                 "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
             })
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             render_charts(results_e.sort_values("market_cap_b", ascending=False), key_prefix="ema")
     else:
-        st.info("Set your rules above and tap **Run 1H EMA Crossover scan**.")
+        st.info("Set your rules above and tap **Run 1H EMA scan**.")
