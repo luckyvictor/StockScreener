@@ -27,6 +27,7 @@ URL in your Android browser and use "Add to Home Screen" for an app-like icon.
 import io
 import json
 import os
+import base64
 from datetime import datetime, timezone
 import requests
 import pandas as pd
@@ -40,10 +41,90 @@ ALL_EXCHANGES = ["NASDAQ", "NYSE", "NYSE American"]
 
 # ----------------------------------------------------------------------------
 # Persistence: scan results (per scanner) and the large-cap universe.
+#
+# Local files (in the app's own storage) are read/written first — fast, and
+# work fine for normal use. But that storage resets if the app's container
+# restarts (e.g. after being idle a while on Streamlit Community Cloud's
+# free tier). To make saves genuinely permanent, every save also pushes to
+# a "data/" folder in your GitHub repo (if configured via secrets — see
+# README), and every load falls back to fetching from GitHub if the local
+# file is missing. This costs nothing (GitHub's API is free at this scale)
+# and doubles as free version history for your saved lists/results.
 # ----------------------------------------------------------------------------
 RESULTS_FILE_DAILY = "last_scan_daily.json"
 RESULTS_FILE_EMA = "last_scan_ema.json"
 LARGE_CAP_FILE = "large_cap_universe.json"
+GITHUB_DATA_DIR = "data"
+
+
+def get_github_config():
+    """Reads GITHUB_TOKEN / GITHUB_REPO / GITHUB_BRANCH from Streamlit
+    secrets. Returns (None, None, None) if not configured — GitHub sync is
+    entirely optional and the app works fine without it (just without the
+    permanence)."""
+    try:
+        token = st.secrets.get("GITHUB_TOKEN")
+        repo = st.secrets.get("GITHUB_REPO")
+        branch = st.secrets.get("GITHUB_BRANCH", "main")
+    except Exception:
+        return None, None, None
+    if not token or not repo:
+        return None, None, None
+    return token, repo, branch
+
+
+def github_configured():
+    token, repo, _ = get_github_config()
+    return bool(token and repo)
+
+
+def github_get_file(path_in_repo):
+    """Fetch a file's text content from the repo. Returns (content, sha) or
+    (None, None) if not found/not configured/any error."""
+    token, repo, branch = get_github_config()
+    if not token:
+        return None, None
+    try:
+        url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+        r = requests.get(
+            url, params={"ref": branch},
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None, None
+        data = r.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data.get("sha")
+    except Exception:
+        return None, None
+
+
+def github_put_file(path_in_repo, content_str, message):
+    """Create/update a file in the repo. Returns True on success, False on
+    any failure (including not being configured) — callers should treat
+    this as best-effort and never let a GitHub failure block a local save."""
+    token, repo, branch = get_github_config()
+    if not token:
+        return False
+    try:
+        _, sha = github_get_file(path_in_repo)
+        url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+        payload = {
+            "message": message,
+            "content": base64.b64encode(content_str.encode("utf-8")).decode("utf-8"),
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+        r = requests.put(
+            url, json=payload,
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+            timeout=15,
+        )
+        return r.status_code in (200, 201)
+    except Exception:
+        return False
 
 
 def save_results(path, df, rules):
@@ -52,38 +133,59 @@ def save_results(path, df, rules):
         "rules": rules,
         "results": df.to_dict(orient="records"),
     }
+    json_str = json.dumps(payload)
     with open(path, "w") as f:
-        json.dump(payload, f)
+        f.write(json_str)
+    return github_put_file(f"{GITHUB_DATA_DIR}/{path}", json_str, f"Update {path}")
 
 
 def load_results(path):
-    if not os.path.exists(path):
-        return None, None, None
-    try:
-        with open(path, "r") as f:
-            payload = json.load(f)
-        df = pd.DataFrame(payload["results"])
-        return df, payload["saved_at"], payload["rules"]
-    except Exception:
-        return None, None, None
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                payload = json.load(f)
+            return pd.DataFrame(payload["results"]), payload["saved_at"], payload["rules"]
+        except Exception:
+            pass
+    # Local file missing (e.g. after a container restart) — try GitHub.
+    content, _ = github_get_file(f"{GITHUB_DATA_DIR}/{path}")
+    if content:
+        try:
+            payload = json.loads(content)
+            with open(path, "w") as f:  # cache locally for next time
+                f.write(content)
+            return pd.DataFrame(payload["results"]), payload["saved_at"], payload["rules"]
+        except Exception:
+            pass
+    return None, None, None
 
 
 def save_large_cap_list(df, meta):
     payload = {"meta": meta, "rows": df.to_dict(orient="records")}
+    json_str = json.dumps(payload)
     with open(LARGE_CAP_FILE, "w") as f:
-        json.dump(payload, f)
+        f.write(json_str)
+    return github_put_file(f"{GITHUB_DATA_DIR}/{LARGE_CAP_FILE}", json_str, "Update large_cap_universe.json")
 
 
 def load_large_cap_list():
-    if not os.path.exists(LARGE_CAP_FILE):
-        return None, None
-    try:
-        with open(LARGE_CAP_FILE, "r") as f:
-            payload = json.load(f)
-        df = pd.DataFrame(payload["rows"])
-        return df, payload["meta"]
-    except Exception:
-        return None, None
+    if os.path.exists(LARGE_CAP_FILE):
+        try:
+            with open(LARGE_CAP_FILE, "r") as f:
+                payload = json.load(f)
+            return pd.DataFrame(payload["rows"]), payload["meta"]
+        except Exception:
+            pass
+    content, _ = github_get_file(f"{GITHUB_DATA_DIR}/{LARGE_CAP_FILE}")
+    if content:
+        try:
+            payload = json.loads(content)
+            with open(LARGE_CAP_FILE, "w") as f:
+                f.write(content)
+            return pd.DataFrame(payload["rows"]), payload["meta"]
+        except Exception:
+            pass
+    return None, None
 
 
 def chunk(lst, size):
@@ -243,10 +345,10 @@ def ensure_universe_loaded():
         "count": len(df),
         "via_screener": via_screener,
     }
-    save_large_cap_list(df, meta)
+    synced = save_large_cap_list(df, meta)
     st.session_state.universe_df = df
     st.session_state.universe_meta = meta
-    st.success(f"Built and saved — {len(df):,} tickers.")
+    st.success(f"Built and saved — {len(df):,} tickers." + (" ☁️ Backed up to GitHub." if synced else ""))
     return df, meta
 
 
@@ -450,6 +552,10 @@ if "universe_df" not in st.session_state:
 
 with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_df is None)):
     st.caption("The ticker list used by both scanners below. Filtered ONLY by market cap — refresh this occasionally (e.g. monthly), not every time you scan.")
+    if github_configured():
+        st.caption("☁️ GitHub backup is configured — saves here are permanent.")
+    else:
+        st.caption("⚠️ GitHub backup not configured — saves only live in this app's temporary storage. See README to set it up.")
     u1, u2 = st.columns([3, 1.3])
     with u1:
         universe_min_cap_b = st.number_input("Market cap threshold ($B)", min_value=0.0, value=10.0, step=1.0, key="u_mcap")
@@ -467,10 +573,10 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
             "count": len(df),
             "via_screener": via_screener,
         }
-        save_large_cap_list(df, meta)
+        synced = save_large_cap_list(df, meta)
         st.session_state.universe_df = df
         st.session_state.universe_meta = meta
-        st.success(f"Refreshed — {len(df):,} tickers saved.")
+        st.success(f"Refreshed — {len(df):,} tickers saved." + (" ☁️ Backed up to GitHub." if synced else ""))
 
     if st.session_state.universe_df is not None and not st.session_state.universe_df.empty:
         m = st.session_state.universe_meta or {}
@@ -529,7 +635,9 @@ with tab_daily:
         else:
             matches = finalize_matches(matches, universe, sort_col="today_pct", sort_asc=False)
             st.session_state.daily_results = matches
-            save_results(RESULTS_FILE_DAILY, matches, rules_used)
+            synced = save_results(RESULTS_FILE_DAILY, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
 
         st.session_state.daily_saved_at = datetime.now(timezone.utc).isoformat()
 
@@ -604,7 +712,9 @@ with tab_ema:
         else:
             matches = finalize_matches(matches, universe, sort_col="bars_ago", sort_asc=True)
             st.session_state.ema_results = matches
-            save_results(RESULTS_FILE_EMA, matches, rules_used)
+            synced = save_results(RESULTS_FILE_EMA, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
 
         st.session_state.ema_saved_at = datetime.now(timezone.utc).isoformat()
 

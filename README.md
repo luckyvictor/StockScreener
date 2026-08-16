@@ -50,6 +50,58 @@ and its container restarts, saved files reset. For the universe list,
 that just means the next scan rebuilds it automatically (a few seconds via
 the screener, not the tens of minutes a per-ticker approach would take).
 
+## Making saves permanent with GitHub backup (free, optional)
+
+By default, saved files (`last_scan_daily.json`, `last_scan_ema.json`,
+`large_cap_universe.json`) live only in the app's own temporary storage,
+which resets if the app's container restarts. To make them genuinely
+permanent, the app can also push every save to a `data/` folder in your
+GitHub repo, and load from there automatically if the local copy is
+missing. This is free — GitHub doesn't charge for commits or API calls at
+this scale — and doubles as free version history.
+
+**This is entirely optional.** Without it configured, the app works exactly
+as before, just without the extra permanence.
+
+### Setup (one-time, ~5 minutes)
+
+1. **Create a GitHub personal access token**, scoped to just this repo:
+   - Go to **github.com/settings/tokens?type=beta** (fine-grained tokens).
+   - Click **Generate new token**.
+   - Under **Repository access**, choose **Only select repositories** and
+     pick your scanner repo.
+   - Under **Permissions → Repository permissions**, set **Contents** to
+     **Read and write**.
+   - Generate the token and copy it (starts with `github_pat_...`) — you
+     won't be able to see it again.
+
+2. **Add it to Streamlit Community Cloud's secrets:**
+   - Open your app on share.streamlit.io, click **⋮ → Settings → Secrets**.
+   - Paste in:
+     ```toml
+     GITHUB_TOKEN = "github_pat_your_token_here"
+     GITHUB_REPO = "yourusername/your-repo-name"
+     GITHUB_BRANCH = "main"
+     ```
+   - Save. The app will reboot automatically with the new secrets.
+
+3. **That's it.** Next time you refresh the universe list or run a scan,
+   you'll see a "☁️ Backed up to GitHub" note, and a `data/` folder will
+   appear in your repo containing the saved JSON files.
+
+### Running locally with the same setup
+Create a `.streamlit/secrets.toml` file (same three lines as above) in the
+project folder. **Add `.streamlit/secrets.toml` to your `.gitignore`** so
+you never accidentally commit your token.
+
+### Things to know
+- Every scan/refresh that saves data also creates a small commit to your
+  repo — that's expected, and gives you a history of past scans/lists if
+  you ever want to look back.
+- If the GitHub push fails for any reason (bad token, rate limit, no
+  network), the local save still happens as normal — GitHub sync is
+  best-effort and never blocks the app from working.
+
 ## Run it locally (on a laptop/desktop)
 ```bash
 pip install -r requirements.txt
