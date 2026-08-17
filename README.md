@@ -31,12 +31,15 @@ already been filtered upstream by the universe layer):
   (default 2%, close-to-close), with today's close in the top portion of
   today's range (default: at least 60% of the way from low to high) so a
   weak bullish candle with a big upper wick doesn't count.
-- **1H EMA Crossover**: on some candle within the last N hourly candles
-  (default 15), the 10-period EMA is above the 90-period EMA (short-term
-  uptrend intact) AND that candle closed strong — its close sits at least
-  X% (default 80%) of the way up its own low-to-high range, so a
-  wishy-washy drift-up candle doesn't count. Uses ~2 months of hourly data.
-  Reports how many candles ago the match happened and the exact timestamp.
+- **1H EMA Crossover**: the 10-period EMA crosses ABOVE the 90-period EMA
+  (a genuine crossover event — not just "currently above," which matched
+  far too many already-trending stocks) within the last N hourly candles
+  (default 15), AND that crossover candle itself closed strong — its close
+  sits at least X% (default 80%, adjustable) of the way up its own
+  low-to-high range. This keeps the list to fresh, early setups rather than
+  stocks that have already been trending for a while. Uses ~2 months of
+  hourly data. Reports how many candles ago the crossover happened and the
+  exact timestamp.
 
 Each scanner's results are saved separately (`last_scan_daily.json` /
 `last_scan_ema.json`) and reload automatically when you reopen or refresh

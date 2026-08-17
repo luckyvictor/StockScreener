@@ -435,15 +435,18 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
 
 
 # ----------------------------------------------------------------------------
-# Scanner 2: 1H EMA10 > EMA90 with a strong close — pattern rules only
+# Scanner 2: 1H EMA10 crosses above EMA90, with a strong close on the
+# crossover candle — pattern rules only
 # ----------------------------------------------------------------------------
 def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, batch_size=100, progress_cb=None):
-    """Batch-download hourly bars and find tickers where, on some candle
-    within the last `lookback_candles` hourly bars:
-    - the 10-period EMA is above the 90-period EMA (short-term uptrend), AND
-    - that candle's close sits at least min_close_position (0-1) of the way
-      up its own low-to-high range (a strong close, not just drifting up).
-    Reports the most recent such candle."""
+    """Batch-download hourly bars and find tickers where, within the last
+    `lookback_candles` hourly bars, the 10-period EMA crossed ABOVE the
+    90-period EMA (a genuine crossover event, not just 'currently above' —
+    this is what keeps the list to early, fresh setups rather than stocks
+    that have already been trending for a while), AND that same crossover
+    candle closed strong — its close sits at least min_close_position (0-1)
+    of the way up its own low-to-high range, not just drifting up on a
+    weak candle. Reports the most recent such crossover."""
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
@@ -472,15 +475,17 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
 
                     ema10 = closes.ewm(span=10, adjust=False).mean()
                     ema90 = closes.ewm(span=90, adjust=False).mean()
+                    diff = ema10 - ema90
                     n = len(closes)
-                    lookback = min(lookback_candles, n)
+                    lookback = min(lookback_candles, n - 1)
                     start = n - lookback
 
                     match_idx = None
                     match_close_pos = None
                     for idx in range(n - 1, start - 1, -1):
-                        if ema10.iloc[idx] <= ema90.iloc[idx]:
-                            continue
+                        prev_diff, curr_diff = diff.iloc[idx - 1], diff.iloc[idx]
+                        if not (prev_diff < 0 and curr_diff >= 0):
+                            continue  # not a crossover candle
                         candle_range = highs.iloc[idx] - lows.iloc[idx]
                         close_pos = (closes.iloc[idx] - lows.iloc[idx]) / candle_range if candle_range > 0 else 1.0
                         if close_pos >= min_close_position:
@@ -666,11 +671,11 @@ with tab_daily:
 
 # ============================== TAB 2: 1H EMA ================================
 with tab_ema:
-    st.markdown("Finds stocks where, on some candle in the last N hourly candles, the **10 EMA is above the 90 EMA** and that **candle closed strong** (close near the high) — scanned from the large-cap universe above.")
+    st.markdown("Finds stocks where the **10 EMA crosses above the 90 EMA** within the last N hourly candles, with the **crossover candle closing strong** (close near the high) — scanned from the large-cap universe above.")
 
     with st.expander("⚙️ Rules", expanded=True):
         lookback_candles = st.number_input(
-            "Must have happened within the last N hourly candles",
+            "Crossover must have happened within the last N hourly candles",
             min_value=1, value=15, step=1, key="e_lookback",
         )
         min_ema_close_position_pct = st.number_input(
