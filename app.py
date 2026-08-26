@@ -52,6 +52,7 @@ ALL_EXCHANGES = ["NASDAQ", "NYSE", "NYSE American"]
 # and doubles as free version history for your saved lists/results.
 # ----------------------------------------------------------------------------
 RESULTS_FILE_DAILY = "last_scan_daily.json"
+RESULTS_FILE_STRONG = "last_scan_strong.json"
 RESULTS_FILE_EMA = "last_scan_ema.json"
 LARGE_CAP_FILE = "large_cap_universe.json"
 GITHUB_DATA_DIR = "data"
@@ -435,6 +436,71 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
 
 
 # ----------------------------------------------------------------------------
+# Scanner: Strong Close Today (pattern rules only — no market cap check here)
+# ----------------------------------------------------------------------------
+def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_size=150, progress_cb=None):
+    """Batch-download 5 days of daily bars and find tickers where:
+    - today's close is up >= min_today_pct% vs. yesterday's close, and
+    - today's close sits at least min_close_position (0-1) of the way up
+      today's low-to-high range — strong upward momentum with very little
+      selling pressure into the close. No requirement on yesterday's
+      candle, unlike the Daily Reversal scanner.
+    """
+    matches = []
+    batches = list(chunk(tickers, batch_size))
+    total = len(batches)
+
+    for i, batch in enumerate(batches):
+        try:
+            data = yf.download(
+                tickers=" ".join(batch), period="5d", interval="1d",
+                group_by="ticker", threads=True, progress=False, auto_adjust=False,
+            )
+        except Exception:
+            data = None
+
+        if data is not None and not data.empty:
+            for t in batch:
+                try:
+                    sub = data if len(batch) == 1 else (data[t] if t in data.columns.get_level_values(0) else None)
+                    if sub is None:
+                        continue
+                    closes = sub["Close"].dropna()
+                    highs = sub["High"].dropna()
+                    lows = sub["Low"].dropna()
+                    vols = sub["Volume"].dropna()
+                    if len(closes) < 2 or len(highs) < 1 or len(lows) < 1:
+                        continue
+                    c_today, c_yesterday = closes.iloc[-1], closes.iloc[-2]
+                    h_today, l_today = highs.iloc[-1], lows.iloc[-1]
+                    if pd.isna(c_today) or pd.isna(c_yesterday) or pd.isna(h_today) or pd.isna(l_today):
+                        continue
+
+                    today_pct = (c_today - c_yesterday) / c_yesterday * 100
+                    today_ok = today_pct >= min_today_pct
+
+                    today_range = h_today - l_today
+                    close_position = (c_today - l_today) / today_range if today_range > 0 else 1.0
+                    close_position_ok = close_position >= min_close_position
+
+                    if today_ok and close_position_ok:
+                        matches.append({
+                            "symbol": t,
+                            "today_pct": round(today_pct, 2),
+                            "close_position_pct": round(close_position * 100, 1),
+                            "last_close": round(float(c_today), 2),
+                            "volume": int(vols.iloc[-1]) if len(vols) else np.nan,
+                        })
+                except Exception:
+                    continue
+
+        if progress_cb:
+            progress_cb((i + 1) / total)
+
+    return pd.DataFrame(matches)
+
+
+# ----------------------------------------------------------------------------
 # Scanner 2: 1H EMA10 crosses above EMA90, with a strong close on the
 # crossover candle — pattern rules only
 # ----------------------------------------------------------------------------
@@ -601,7 +667,7 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
     else:
         st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
-tab_daily, tab_ema = st.tabs(["📉 Daily Reversal", "📈 1H EMA Crossover"])
+tab_daily, tab_strong, tab_ema = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "📈 1H EMA Crossover"])
 
 # ============================== TAB 1: DAILY ================================
 with tab_daily:
@@ -676,7 +742,78 @@ with tab_daily:
     else:
         st.info("Set your rules above and tap **Run Daily Reversal scan**.")
 
-# ============================== TAB 2: 1H EMA ================================
+# ========================= TAB 2: STRONG CLOSE TODAY =========================
+with tab_strong:
+    st.markdown("Finds stocks **up X% today** that **closed strong** — strong upward momentum with very little selling pressure into the close. No requirement on yesterday's candle, unlike Daily Reversal — scanned from the large-cap universe above.")
+
+    with st.expander("⚙️ Rules", expanded=True):
+        min_strong_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=3.0, step=0.5, key="s_pct")
+        min_strong_close_position_pct = st.number_input(
+            "Min close position within today's range (%)", min_value=0.0, max_value=100.0, value=80.0, step=5.0,
+            key="s_close_pos",
+            help="Today's close must sit at least this far up today's low-to-high range.",
+        )
+
+    run_strong = st.button("🔍 Run Strong Close scan", type="primary", use_container_width=True, key="run_strong")
+
+    if "strong_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_STRONG)
+        st.session_state.strong_results = df0
+        st.session_state.strong_saved_at = saved_at0
+
+    if run_strong:
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers for price action...")
+
+        progress = st.progress(0.0)
+        matches = scan_strong_close_today(
+            tickers, min_today_pct=min_strong_today_pct,
+            min_close_position=min_strong_close_position_pct / 100.0, progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+
+        rules_used = {
+            "min_today_pct": min_strong_today_pct,
+            "min_close_position_pct": min_strong_close_position_pct,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+
+        if matches.empty:
+            st.session_state.strong_results = pd.DataFrame()
+            save_results(RESULTS_FILE_STRONG, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="today_pct", sort_asc=False)
+            st.session_state.strong_results = matches
+            synced = save_results(RESULTS_FILE_STRONG, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+
+        st.session_state.strong_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_s = st.session_state.strong_results
+
+    if results_s is not None and not results_s.empty and st.session_state.get("strong_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.strong_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+
+    if results_s is not None:
+        if results_s.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_s)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "today_pct", "close_position_pct", "market_cap_b", "last_close", "volume"]
+            display_df = results_s[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "today_pct": "Today %", "close_position_pct": "Close Position %",
+                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close", "volume": "Volume",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_s.sort_values("market_cap_b", ascending=False), key_prefix="strong")
+    else:
+        st.info("Set your rules above and tap **Run Strong Close scan**.")
+
+# ============================== TAB 3: 1H EMA ================================
 with tab_ema:
     st.markdown("Finds stocks where the **10 EMA crosses above the 90 EMA** within the last N hourly candles, with the **crossover candle closing strong** (close near the high) — scanned from the large-cap universe above.")
 
