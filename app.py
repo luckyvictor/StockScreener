@@ -519,11 +519,18 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
 def render_charts(results_sorted_df, key_prefix):
     st.subheader(f"Charts ({len(results_sorted_df)})")
     st.caption("Charts are from Finviz (includes moving averages). Tap 'Open on Finviz' for the full interactive version.")
+    has_ema_match_info = "match_time" in results_sorted_df.columns
     for _, row in results_sorted_df.iterrows():
         symbol = row["symbol"]
         name = row.get("name", "")
         header = f"{symbol} — {name}" if isinstance(name, str) and name else symbol
         st.markdown(f"**{header}**")
+        if has_ema_match_info:
+            st.caption(
+                f"Crossover candle: **{row.get('match_time', '?')}** UTC · "
+                f"{int(row.get('bars_ago', 0))} candle(s) ago · "
+                f"close position {row.get('close_position_pct', float('nan')):.1f}%"
+            )
         chart_img_url, quote_page_url = finviz_urls(symbol)
         st.image(chart_img_url, use_container_width=True)
         st.link_button(f"Open {symbol} on Finviz ↗", quote_page_url, use_container_width=True, key=f"{key_prefix}_link_{symbol}")
