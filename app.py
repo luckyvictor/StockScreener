@@ -504,21 +504,24 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
 # ----------------------------------------------------------------------------
 # Scanner: 1H Triple EMA Bullish Stack (EMA10 > EMA25 > EMA90 forms fresh)
 # ----------------------------------------------------------------------------
-def scan_triple_ema_stack_cross(tickers, lookback_candles, batch_size=100, progress_cb=None):
+def scan_triple_ema_stack_cross(tickers, lookback_candles, clean_lookback_candles=70, batch_size=100, progress_cb=None):
     """Batch-download hourly bars and find tickers where, within the last
     `lookback_candles` hourly bars, the three EMAs FIRST become bullishly
     aligned (EMA10 > EMA25 > EMA90) — i.e. the candle right before did NOT
-    have this alignment, and the candle at the match does. Reports the most
-    recent such moment."""
+    have this alignment — AND, counting back from that candle, none of the
+    prior `clean_lookback_candles` candles had this alignment either. That
+    second condition filters out stocks that just keep oscillating in and
+    out of alignment, keeping only a genuinely fresh formation. Reports the
+    most recent such moment."""
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-    min_bars_needed = 90 + 20  # enough history for a stable EMA90 plus a little buffer
+    min_bars_needed = 90 + clean_lookback_candles + lookback_candles + 10  # EMA90 stability + clean window + lookback + buffer
 
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
-                tickers=" ".join(batch), period="2mo", interval="60m",
+                tickers=" ".join(batch), period="3mo", interval="60m",
                 group_by="ticker", threads=True, progress=False, auto_adjust=False,
             )
         except Exception:
@@ -534,7 +537,7 @@ def scan_triple_ema_stack_cross(tickers, lookback_candles, batch_size=100, progr
                     if len(closes) < min_bars_needed:
                         continue
 
-                    # --- Core condition being checked (see explanation below) ---
+                    # --- Core condition being checked ---
                     ema10 = closes.ewm(span=10, adjust=False).mean()
                     ema25 = closes.ewm(span=25, adjust=False).mean()
                     ema90 = closes.ewm(span=90, adjust=False).mean()
@@ -546,9 +549,15 @@ def scan_triple_ema_stack_cross(tickers, lookback_candles, batch_size=100, progr
 
                     match_idx = None
                     for idx in range(n - 1, start - 1, -1):
-                        if aligned.iloc[idx] and not aligned.iloc[idx - 1]:
-                            match_idx = idx
-                            break
+                        if not (aligned.iloc[idx] and not aligned.iloc[idx - 1]):
+                            continue  # not the moment alignment first formed
+                        if idx < clean_lookback_candles:
+                            continue  # not enough prior history to confirm it's genuinely fresh
+                        prior_window = aligned.iloc[idx - clean_lookback_candles : idx]
+                        if prior_window.any():
+                            continue  # alignment occurred recently too -> oscillating, not fresh
+                        match_idx = idx
+                        break
                     # --- End of core condition ---
 
                     if match_idx is not None:
@@ -886,34 +895,19 @@ with tab_strong:
 
 # ========================= TAB 3: TRIPLE EMA STACK ===========================
 with tab_stack:
-    st.markdown("Finds stocks where **EMA10 > EMA25 > EMA90** (a bullish stack) first forms within the last N hourly candles — the candle right before must NOT have this alignment, so only the fresh moment it forms counts. Scanned from the large-cap universe above.")
+    st.markdown("Finds stocks where **EMA10 > EMA25 > EMA90** (a bullish stack) first forms within the last N hourly candles, with no such alignment in a longer lookback before that — filtering out stocks that just oscillate in and out of alignment. Scanned from the large-cap universe above.")
 
     with st.expander("⚙️ Rules", expanded=True):
         stack_lookback_candles = st.number_input(
             "Alignment must have first formed within the last N hourly candles",
             min_value=1, value=15, step=1, key="k_lookback",
         )
-        st.caption("Uses ~2 months of hourly data so the 90-period EMA has enough history to be meaningful.")
-
-    with st.expander("🔍 Code used to check this condition"):
-        st.code(
-            '''ema10 = closes.ewm(span=10, adjust=False).mean()
-ema25 = closes.ewm(span=25, adjust=False).mean()
-ema90 = closes.ewm(span=90, adjust=False).mean()
-aligned = (ema10 > ema25) & (ema25 > ema90)
-
-n = len(closes)
-lookback = min(lookback_candles, n - 1)
-start = n - lookback
-
-match_idx = None
-for idx in range(n - 1, start - 1, -1):
-    if aligned.iloc[idx] and not aligned.iloc[idx - 1]:
-        match_idx = idx
-        break''',
-            language="python",
+        stack_clean_lookback_candles = st.number_input(
+            "No alignment allowed in the N candles before that",
+            min_value=1, value=70, step=5, key="k_clean_lookback",
+            help="Counting back from the candle where alignment forms, none of these prior candles may have already had EMA10 > EMA25 > EMA90 — this filters out stocks that keep oscillating around the EMAs rather than making a genuinely fresh move.",
         )
-        st.caption("Scans backward from the most recent candle. `aligned.iloc[idx]` = all three EMAs in bullish order at that candle; `not aligned.iloc[idx-1]` = the candle right before did NOT have that order — so this only fires at the exact candle the stack first forms, not on every candle it persists afterward.")
+        st.caption("Uses ~3 months of hourly data so there's enough history for both lookback windows plus a stable 90-period EMA.")
 
     run_stack = st.button("🔍 Run Triple EMA Stack scan", type="primary", use_container_width=True, key="run_stack")
 
@@ -929,12 +923,15 @@ for idx in range(n - 1, start - 1, -1):
 
         progress = st.progress(0.0)
         matches = scan_triple_ema_stack_cross(
-            tickers, lookback_candles=stack_lookback_candles, progress_cb=lambda p: progress.progress(p),
+            tickers, lookback_candles=stack_lookback_candles,
+            clean_lookback_candles=stack_clean_lookback_candles,
+            progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
 
         rules_used = {
             "lookback_candles": stack_lookback_candles,
+            "clean_lookback_candles": stack_clean_lookback_candles,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
 
