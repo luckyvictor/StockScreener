@@ -54,6 +54,7 @@ ALL_EXCHANGES = ["NASDAQ", "NYSE", "NYSE American"]
 RESULTS_FILE_DAILY = "last_scan_daily.json"
 RESULTS_FILE_STRONG = "last_scan_strong.json"
 RESULTS_FILE_EMA = "last_scan_ema.json"
+RESULTS_FILE_STACK = "last_scan_stack.json"
 LARGE_CAP_FILE = "large_cap_universe.json"
 GITHUB_DATA_DIR = "data"
 
@@ -501,6 +502,76 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
 
 
 # ----------------------------------------------------------------------------
+# Scanner: 1H Triple EMA Bullish Stack (EMA10 > EMA25 > EMA90 forms fresh)
+# ----------------------------------------------------------------------------
+def scan_triple_ema_stack_cross(tickers, lookback_candles, batch_size=100, progress_cb=None):
+    """Batch-download hourly bars and find tickers where, within the last
+    `lookback_candles` hourly bars, the three EMAs FIRST become bullishly
+    aligned (EMA10 > EMA25 > EMA90) — i.e. the candle right before did NOT
+    have this alignment, and the candle at the match does. Reports the most
+    recent such moment."""
+    matches = []
+    batches = list(chunk(tickers, batch_size))
+    total = len(batches)
+    min_bars_needed = 90 + 20  # enough history for a stable EMA90 plus a little buffer
+
+    for i, batch in enumerate(batches):
+        try:
+            data = yf.download(
+                tickers=" ".join(batch), period="2mo", interval="60m",
+                group_by="ticker", threads=True, progress=False, auto_adjust=False,
+            )
+        except Exception:
+            data = None
+
+        if data is not None and not data.empty:
+            for t in batch:
+                try:
+                    sub = data if len(batch) == 1 else (data[t] if t in data.columns.get_level_values(0) else None)
+                    if sub is None:
+                        continue
+                    closes = sub["Close"].dropna()
+                    if len(closes) < min_bars_needed:
+                        continue
+
+                    # --- Core condition being checked (see explanation below) ---
+                    ema10 = closes.ewm(span=10, adjust=False).mean()
+                    ema25 = closes.ewm(span=25, adjust=False).mean()
+                    ema90 = closes.ewm(span=90, adjust=False).mean()
+                    aligned = (ema10 > ema25) & (ema25 > ema90)
+
+                    n = len(closes)
+                    lookback = min(lookback_candles, n - 1)
+                    start = n - lookback
+
+                    match_idx = None
+                    for idx in range(n - 1, start - 1, -1):
+                        if aligned.iloc[idx] and not aligned.iloc[idx - 1]:
+                            match_idx = idx
+                            break
+                    # --- End of core condition ---
+
+                    if match_idx is not None:
+                        bars_ago = (n - 1) - match_idx
+                        matches.append({
+                            "symbol": t,
+                            "bars_ago": int(bars_ago),
+                            "match_time": str(closes.index[match_idx]),
+                            "ema10_last": round(float(ema10.iloc[-1]), 2),
+                            "ema25_last": round(float(ema25.iloc[-1]), 2),
+                            "ema90_last": round(float(ema90.iloc[-1]), 2),
+                            "last_close": round(float(closes.iloc[-1]), 2),
+                        })
+                except Exception:
+                    continue
+
+        if progress_cb:
+            progress_cb((i + 1) / total)
+
+    return pd.DataFrame(matches)
+
+
+# ----------------------------------------------------------------------------
 # Scanner 2: 1H EMA10 crosses above EMA90, with a strong close on the
 # crossover candle — pattern rules only
 # ----------------------------------------------------------------------------
@@ -585,18 +656,18 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
 def render_charts(results_sorted_df, key_prefix):
     st.subheader(f"Charts ({len(results_sorted_df)})")
     st.caption("Charts are from Finviz (includes moving averages). Tap 'Open on Finviz' for the full interactive version.")
-    has_ema_match_info = "match_time" in results_sorted_df.columns
+    has_match_time = "match_time" in results_sorted_df.columns
+    has_close_pos = "close_position_pct" in results_sorted_df.columns
     for _, row in results_sorted_df.iterrows():
         symbol = row["symbol"]
         name = row.get("name", "")
         header = f"{symbol} — {name}" if isinstance(name, str) and name else symbol
         st.markdown(f"**{header}**")
-        if has_ema_match_info:
-            st.caption(
-                f"Crossover candle: **{row.get('match_time', '?')}** UTC · "
-                f"{int(row.get('bars_ago', 0))} candle(s) ago · "
-                f"close position {row.get('close_position_pct', float('nan')):.1f}%"
-            )
+        if has_match_time:
+            parts = [f"Match candle: **{row.get('match_time', '?')}** UTC", f"{int(row.get('bars_ago', 0))} candle(s) ago"]
+            if has_close_pos:
+                parts.append(f"close position {row.get('close_position_pct', float('nan')):.1f}%")
+            st.caption(" · ".join(parts))
         chart_img_url, quote_page_url = finviz_urls(symbol)
         st.image(chart_img_url, use_container_width=True)
         st.link_button(f"Open {symbol} on Finviz ↗", quote_page_url, use_container_width=True, key=f"{key_prefix}_link_{symbol}")
@@ -667,7 +738,7 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
     else:
         st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
-tab_daily, tab_strong, tab_ema = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "📈 1H EMA Crossover"])
+tab_daily, tab_strong, tab_stack, tab_ema = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "📈 1H EMA Crossover"])
 
 # ============================== TAB 1: DAILY ================================
 with tab_daily:
@@ -813,7 +884,96 @@ with tab_strong:
     else:
         st.info("Set your rules above and tap **Run Strong Close scan**.")
 
-# ============================== TAB 3: 1H EMA ================================
+# ========================= TAB 3: TRIPLE EMA STACK ===========================
+with tab_stack:
+    st.markdown("Finds stocks where **EMA10 > EMA25 > EMA90** (a bullish stack) first forms within the last N hourly candles — the candle right before must NOT have this alignment, so only the fresh moment it forms counts. Scanned from the large-cap universe above.")
+
+    with st.expander("⚙️ Rules", expanded=True):
+        stack_lookback_candles = st.number_input(
+            "Alignment must have first formed within the last N hourly candles",
+            min_value=1, value=15, step=1, key="k_lookback",
+        )
+        st.caption("Uses ~2 months of hourly data so the 90-period EMA has enough history to be meaningful.")
+
+    with st.expander("🔍 Code used to check this condition"):
+        st.code(
+            '''ema10 = closes.ewm(span=10, adjust=False).mean()
+ema25 = closes.ewm(span=25, adjust=False).mean()
+ema90 = closes.ewm(span=90, adjust=False).mean()
+aligned = (ema10 > ema25) & (ema25 > ema90)
+
+n = len(closes)
+lookback = min(lookback_candles, n - 1)
+start = n - lookback
+
+match_idx = None
+for idx in range(n - 1, start - 1, -1):
+    if aligned.iloc[idx] and not aligned.iloc[idx - 1]:
+        match_idx = idx
+        break''',
+            language="python",
+        )
+        st.caption("Scans backward from the most recent candle. `aligned.iloc[idx]` = all three EMAs in bullish order at that candle; `not aligned.iloc[idx-1]` = the candle right before did NOT have that order — so this only fires at the exact candle the stack first forms, not on every candle it persists afterward.")
+
+    run_stack = st.button("🔍 Run Triple EMA Stack scan", type="primary", use_container_width=True, key="run_stack")
+
+    if "stack_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_STACK)
+        st.session_state.stack_results = df0
+        st.session_state.stack_saved_at = saved_at0
+
+    if run_stack:
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the 1H chart for a fresh EMA10>EMA25>EMA90 stack (this can take a while — hourly data is heavier than daily)...")
+
+        progress = st.progress(0.0)
+        matches = scan_triple_ema_stack_cross(
+            tickers, lookback_candles=stack_lookback_candles, progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+
+        rules_used = {
+            "lookback_candles": stack_lookback_candles,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+
+        if matches.empty:
+            st.session_state.stack_results = pd.DataFrame()
+            save_results(RESULTS_FILE_STACK, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="bars_ago", sort_asc=True)
+            st.session_state.stack_results = matches
+            synced = save_results(RESULTS_FILE_STACK, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+
+        st.session_state.stack_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_k = st.session_state.stack_results
+
+    if results_k is not None and not results_k.empty and st.session_state.get("stack_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.stack_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+
+    if results_k is not None:
+        if results_k.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_k)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "ema10_last", "ema25_last", "ema90_last", "market_cap_b", "last_close"]
+            display_df = results_k[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "bars_ago": "Candles Ago", "match_time": "Match Time (UTC)",
+                "ema10_last": "EMA10 (now)", "ema25_last": "EMA25 (now)", "ema90_last": "EMA90 (now)",
+                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_k.sort_values("market_cap_b", ascending=False), key_prefix="stack")
+    else:
+        st.info("Set your rules above and tap **Run Triple EMA Stack scan**.")
+
+# ============================== TAB 4: 1H EMA ================================
 with tab_ema:
     st.markdown("Finds stocks where the **10 EMA crosses above the 90 EMA** within the last N hourly candles, with the **crossover candle closing strong** (close near the high) — scanned from the large-cap universe above.")
 
