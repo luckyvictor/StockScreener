@@ -503,19 +503,19 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
 
 
 # ----------------------------------------------------------------------------
-# Scanner: 1H EMA25 Reclaim (bullish candle crosses through EMA25, closes
-# strong above it)
+# Scanner: 1H EMA10/25 Reclaim (bullish candle crosses through BOTH EMA10
+# and EMA25, closes strong above both)
 # ----------------------------------------------------------------------------
 def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size=150, progress_cb=None):
     """Batch-download hourly bars and find tickers where, within the last
     `lookback_candles` hourly bars, some candle:
     - is bullish (close > open),
-    - "crosses" EMA25 — the EMA25 value sits within that candle's
-      low-to-high range (i.e. price traded through the EMA during the
-      candle), and
-    - closes above EMA25, with the close sitting at least
+    - "crosses" BOTH EMA10 and EMA25 — both EMA values sit within that
+      candle's low-to-high range (i.e. price traded through both during
+      the candle), and
+    - closes above both EMAs, with the close sitting at least
       min_close_position (0-1) of the way up its own low-to-high range —
-      a strong reclaim, not just a weak poke through the line.
+      a strong reclaim, not just a weak poke through the lines.
     Reports the most recent such candle."""
     matches = []
     batches = list(chunk(tickers, batch_size))
@@ -544,6 +544,7 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
                     if min(len(closes), len(opens), len(highs), len(lows)) < min_bars_needed:
                         continue
 
+                    ema10 = closes.ewm(span=10, adjust=False).mean()
                     ema25 = closes.ewm(span=25, adjust=False).mean()
                     n = len(closes)
                     lookback = min(lookback_candles, n)
@@ -552,13 +553,15 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
                     match_idx = None
                     match_close_pos = None
                     for idx in range(n - 1, start - 1, -1):
-                        o, c, h, l, e = opens.iloc[idx], closes.iloc[idx], highs.iloc[idx], lows.iloc[idx], ema25.iloc[idx]
+                        o, c, h, l = opens.iloc[idx], closes.iloc[idx], highs.iloc[idx], lows.iloc[idx]
+                        e10, e25 = ema10.iloc[idx], ema25.iloc[idx]
                         bullish = c > o
-                        crosses_ema = l <= e <= h
-                        closes_above = c > e
+                        crosses_ema10 = l <= e10 <= h
+                        crosses_ema25 = l <= e25 <= h
+                        closes_above_both = c > e10 and c > e25
                         candle_range = h - l
                         close_pos = (c - l) / candle_range if candle_range > 0 else 1.0
-                        if bullish and crosses_ema and closes_above and close_pos >= min_close_position:
+                        if bullish and crosses_ema10 and crosses_ema25 and closes_above_both and close_pos >= min_close_position:
                             match_idx = idx
                             match_close_pos = close_pos
                             break
@@ -570,7 +573,9 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
                             "bars_ago": int(bars_ago),
                             "match_time": str(closes.index[match_idx]),
                             "close_position_pct": round(match_close_pos * 100, 1),
+                            "ema10_at_match": round(float(ema10.iloc[match_idx]), 2),
                             "ema25_at_match": round(float(ema25.iloc[match_idx]), 2),
+                            "ema10_last": round(float(ema10.iloc[-1]), 2),
                             "ema25_last": round(float(ema25.iloc[-1]), 2),
                             "last_close": round(float(closes.iloc[-1]), 2),
                         })
@@ -829,7 +834,7 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
     else:
         st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
-tab_daily, tab_strong, tab_stack, tab_reclaim, tab_ema = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🎯 EMA25 Reclaim", "📈 1H EMA Crossover"])
+tab_daily, tab_strong, tab_stack, tab_reclaim, tab_ema = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🎯 EMA10/25 Reclaim", "📈 1H EMA Crossover"])
 
 # ============================== TAB 1: DAILY ================================
 with tab_daily:
@@ -1052,9 +1057,9 @@ with tab_stack:
     else:
         st.info("Set your rules above and tap **Run Triple EMA Stack scan**.")
 
-# ========================= TAB 4: EMA25 RECLAIM ==============================
+# ========================= TAB 4: EMA10/25 RECLAIM ===========================
 with tab_reclaim:
-    st.markdown("Finds stocks where a **bullish candle crosses through EMA25 and closes strong above it** — the EMA25 value sits within that candle's high-low range (price traded through it), the candle closes above EMA25, and the close sits near the candle's own high. Scanned from the large-cap universe above.")
+    st.markdown("Finds stocks where a **bullish candle crosses through both EMA10 and EMA25 and closes strong above both** — both EMA values sit within that candle's high-low range (price traded through them), the candle closes above both, and the close sits near the candle's own high. Scanned from the large-cap universe above.")
 
     with st.expander("⚙️ Rules", expanded=True):
         reclaim_lookback_candles = st.number_input(
@@ -1066,9 +1071,9 @@ with tab_reclaim:
             min_value=0.0, max_value=100.0, value=90.0, step=5.0, key="r_close_pos",
             help="The reclaim candle's close must sit at least this far up its own low-to-high range.",
         )
-        st.caption("Uses ~1 month of hourly data — enough history for a stable 25-period EMA.")
+        st.caption("Uses ~1 month of hourly data — enough history for stable 10- and 25-period EMAs.")
 
-    run_reclaim = st.button("🔍 Run EMA25 Reclaim scan", type="primary", use_container_width=True, key="run_reclaim")
+    run_reclaim = st.button("🔍 Run EMA10/25 Reclaim scan", type="primary", use_container_width=True, key="run_reclaim")
 
     if "reclaim_results" not in st.session_state:
         df0, saved_at0, rules0 = load_results(RESULTS_FILE_RECLAIM)
@@ -1117,18 +1122,19 @@ with tab_reclaim:
             st.info("No matches found with the current rules.")
         else:
             st.success(f"Found {len(results_r)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "close_position_pct", "ema25_at_match", "ema25_last", "market_cap_b", "last_close"]
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "close_position_pct", "ema10_at_match", "ema25_at_match", "ema10_last", "ema25_last", "market_cap_b", "last_close"]
             display_df = results_r[display_cols].rename(columns={
                 "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
                 "bars_ago": "Candles Ago", "match_time": "Match Time (UTC)",
                 "close_position_pct": "Close Position %",
-                "ema25_at_match": "EMA25 (at match)", "ema25_last": "EMA25 (now)",
+                "ema10_at_match": "EMA10 (at match)", "ema25_at_match": "EMA25 (at match)",
+                "ema10_last": "EMA10 (now)", "ema25_last": "EMA25 (now)",
                 "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
             })
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             render_charts(results_r.sort_values("market_cap_b", ascending=False), key_prefix="reclaim")
     else:
-        st.info("Set your rules above and tap **Run EMA25 Reclaim scan**.")
+        st.info("Set your rules above and tap **Run EMA10/25 Reclaim scan**.")
 
 # ============================== TAB 5: 1H EMA ================================
 with tab_ema:
