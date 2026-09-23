@@ -834,7 +834,7 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
     else:
         st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
-tab_daily, tab_strong, tab_stack, tab_reclaim, tab_ema = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🎯 EMA10/25 Reclaim", "📈 1H EMA Crossover"])
+tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🎯 EMA10/25 Reclaim", "📈 1H EMA Crossover"])
 
 # ============================== TAB 1: DAILY ================================
 with tab_daily:
