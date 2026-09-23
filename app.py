@@ -843,11 +843,11 @@ with tab_reclaim:
     with st.expander("⚙️ Rules", expanded=True):
         reclaim_lookback_candles = st.number_input(
             "Must have happened within the last N hourly candles",
-            min_value=1, value=7, step=1, key="r_lookback",
+            min_value=1, value=3, step=1, key="r_lookback",
         )
         min_reclaim_close_position_pct = st.number_input(
             "Min close position within that candle's range (%)",
-            min_value=0.0, max_value=100.0, value=90.0, step=5.0, key="r_close_pos",
+            min_value=0.0, max_value=100.0, value=85.0, step=5.0, key="r_close_pos",
             help="The reclaim candle's close must sit at least this far up its own low-to-high range.",
         )
         st.caption("Uses ~1 month of hourly data — enough history for stable 10- and 25-period EMAs.")
