@@ -836,228 +836,7 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
 
 tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack = st.tabs(["📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🎯 EMA10/25 Reclaim", "📈 1H EMA Crossover"])
 
-# ============================== TAB 1: DAILY ================================
-with tab_daily:
-    st.markdown("Finds stocks with a **red candle yesterday**, **up X% today**, closing strong — scanned from the large-cap universe above.")
-
-    with st.expander("⚙️ Rules", expanded=True):
-        require_red_yesterday = st.checkbox("Yesterday must be down (red)", value=True, key="d_red")
-        min_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=2.0, step=0.5, key="d_pct")
-        min_close_position_pct = st.number_input(
-            "Min close position within today's range (%)", min_value=0.0, max_value=100.0, value=60.0, step=5.0,
-            key="d_close_pos",
-            help="Today's close must sit at least this far up today's low-to-high range.",
-        )
-
-    run_daily = st.button("🔍 Run Daily Reversal scan", type="primary", use_container_width=True, key="run_daily")
-
-    if "daily_results" not in st.session_state:
-        df0, saved_at0, rules0 = load_results(RESULTS_FILE_DAILY)
-        st.session_state.daily_results = df0
-        st.session_state.daily_saved_at = saved_at0
-
-    if run_daily:
-        universe, universe_meta = ensure_universe_loaded()
-        tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** large-cap tickers for price action...")
-
-        progress = st.progress(0.0)
-        matches = scan_daily_reversal(
-            tickers, min_today_pct=min_today_pct, require_red_yesterday=require_red_yesterday,
-            min_close_position=min_close_position_pct / 100.0, progress_cb=lambda p: progress.progress(p),
-        )
-        progress.empty()
-
-        rules_used = {
-            "require_red_yesterday": require_red_yesterday, "min_today_pct": min_today_pct,
-            "min_close_position_pct": min_close_position_pct,
-            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
-        }
-
-        if matches.empty:
-            st.session_state.daily_results = pd.DataFrame()
-            save_results(RESULTS_FILE_DAILY, pd.DataFrame(), rules_used)
-        else:
-            matches = finalize_matches(matches, universe, sort_col="today_pct", sort_asc=False)
-            st.session_state.daily_results = matches
-            synced = save_results(RESULTS_FILE_DAILY, matches, rules_used)
-            if synced:
-                st.caption("☁️ Results backed up to GitHub.")
-
-        st.session_state.daily_saved_at = datetime.now(timezone.utc).isoformat()
-
-    results_d = st.session_state.daily_results
-
-    if results_d is not None and not results_d.empty and st.session_state.get("daily_saved_at"):
-        saved_dt = datetime.fromisoformat(st.session_state.daily_saved_at)
-        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
-    if results_d is not None:
-        if results_d.empty:
-            st.info("No matches found with the current rules.")
-        else:
-            st.success(f"Found {len(results_d)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "yesterday_pct", "today_pct", "close_position_pct", "market_cap_b", "last_close", "volume"]
-            display_df = results_d[display_cols].rename(columns={
-                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
-                "yesterday_pct": "Yesterday % (Open→Close)", "today_pct": "Today %",
-                "close_position_pct": "Close Position %", "market_cap_b": "Mkt Cap ($B)",
-                "last_close": "Last Close", "volume": "Volume",
-            })
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-            render_charts(results_d.sort_values("market_cap_b", ascending=False), key_prefix="daily")
-    else:
-        st.info("Set your rules above and tap **Run Daily Reversal scan**.")
-
-# ========================= TAB 2: STRONG CLOSE TODAY =========================
-with tab_strong:
-    st.markdown("Finds stocks **up X% today** that **closed strong** — strong upward momentum with very little selling pressure into the close. No requirement on yesterday's candle, unlike Daily Reversal — scanned from the large-cap universe above.")
-
-    with st.expander("⚙️ Rules", expanded=True):
-        min_strong_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=3.0, step=0.5, key="s_pct")
-        min_strong_close_position_pct = st.number_input(
-            "Min close position within today's range (%)", min_value=0.0, max_value=100.0, value=80.0, step=5.0,
-            key="s_close_pos",
-            help="Today's close must sit at least this far up today's low-to-high range.",
-        )
-
-    run_strong = st.button("🔍 Run Strong Close scan", type="primary", use_container_width=True, key="run_strong")
-
-    if "strong_results" not in st.session_state:
-        df0, saved_at0, rules0 = load_results(RESULTS_FILE_STRONG)
-        st.session_state.strong_results = df0
-        st.session_state.strong_saved_at = saved_at0
-
-    if run_strong:
-        universe, universe_meta = ensure_universe_loaded()
-        tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** large-cap tickers for price action...")
-
-        progress = st.progress(0.0)
-        matches = scan_strong_close_today(
-            tickers, min_today_pct=min_strong_today_pct,
-            min_close_position=min_strong_close_position_pct / 100.0, progress_cb=lambda p: progress.progress(p),
-        )
-        progress.empty()
-
-        rules_used = {
-            "min_today_pct": min_strong_today_pct,
-            "min_close_position_pct": min_strong_close_position_pct,
-            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
-        }
-
-        if matches.empty:
-            st.session_state.strong_results = pd.DataFrame()
-            save_results(RESULTS_FILE_STRONG, pd.DataFrame(), rules_used)
-        else:
-            matches = finalize_matches(matches, universe, sort_col="today_pct", sort_asc=False)
-            st.session_state.strong_results = matches
-            synced = save_results(RESULTS_FILE_STRONG, matches, rules_used)
-            if synced:
-                st.caption("☁️ Results backed up to GitHub.")
-
-        st.session_state.strong_saved_at = datetime.now(timezone.utc).isoformat()
-
-    results_s = st.session_state.strong_results
-
-    if results_s is not None and not results_s.empty and st.session_state.get("strong_saved_at"):
-        saved_dt = datetime.fromisoformat(st.session_state.strong_saved_at)
-        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
-    if results_s is not None:
-        if results_s.empty:
-            st.info("No matches found with the current rules.")
-        else:
-            st.success(f"Found {len(results_s)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "today_pct", "close_position_pct", "market_cap_b", "last_close", "volume"]
-            display_df = results_s[display_cols].rename(columns={
-                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
-                "today_pct": "Today %", "close_position_pct": "Close Position %",
-                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close", "volume": "Volume",
-            })
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-            render_charts(results_s.sort_values("market_cap_b", ascending=False), key_prefix="strong")
-    else:
-        st.info("Set your rules above and tap **Run Strong Close scan**.")
-
-# ========================= TAB 3: TRIPLE EMA STACK ===========================
-with tab_stack:
-    st.markdown("Finds stocks where **EMA10 > EMA25 > EMA90** (a bullish stack) first forms within the last N hourly candles, with no such alignment in a longer lookback before that — filtering out stocks that just oscillate in and out of alignment. Scanned from the large-cap universe above.")
-
-    with st.expander("⚙️ Rules", expanded=True):
-        stack_lookback_candles = st.number_input(
-            "Alignment must have first formed within the last N hourly candles",
-            min_value=1, value=15, step=1, key="k_lookback",
-        )
-        stack_clean_lookback_candles = st.number_input(
-            "No alignment allowed in the N candles before that",
-            min_value=1, value=70, step=5, key="k_clean_lookback",
-            help="Counting back from the candle where alignment forms, none of these prior candles may have already had EMA10 > EMA25 > EMA90 — this filters out stocks that keep oscillating around the EMAs rather than making a genuinely fresh move.",
-        )
-        st.caption("Uses ~3 months of hourly data so there's enough history for both lookback windows plus a stable 90-period EMA.")
-
-    run_stack = st.button("🔍 Run Triple EMA Stack scan", type="primary", use_container_width=True, key="run_stack")
-
-    if "stack_results" not in st.session_state:
-        df0, saved_at0, rules0 = load_results(RESULTS_FILE_STACK)
-        st.session_state.stack_results = df0
-        st.session_state.stack_saved_at = saved_at0
-
-    if run_stack:
-        universe, universe_meta = ensure_universe_loaded()
-        tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the 1H chart for a fresh EMA10>EMA25>EMA90 stack (this can take a while — hourly data is heavier than daily)...")
-
-        progress = st.progress(0.0)
-        matches = scan_triple_ema_stack_cross(
-            tickers, lookback_candles=stack_lookback_candles,
-            clean_lookback_candles=stack_clean_lookback_candles,
-            progress_cb=lambda p: progress.progress(p),
-        )
-        progress.empty()
-
-        rules_used = {
-            "lookback_candles": stack_lookback_candles,
-            "clean_lookback_candles": stack_clean_lookback_candles,
-            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
-        }
-
-        if matches.empty:
-            st.session_state.stack_results = pd.DataFrame()
-            save_results(RESULTS_FILE_STACK, pd.DataFrame(), rules_used)
-        else:
-            matches = finalize_matches(matches, universe, sort_col="bars_ago", sort_asc=True)
-            st.session_state.stack_results = matches
-            synced = save_results(RESULTS_FILE_STACK, matches, rules_used)
-            if synced:
-                st.caption("☁️ Results backed up to GitHub.")
-
-        st.session_state.stack_saved_at = datetime.now(timezone.utc).isoformat()
-
-    results_k = st.session_state.stack_results
-
-    if results_k is not None and not results_k.empty and st.session_state.get("stack_saved_at"):
-        saved_dt = datetime.fromisoformat(st.session_state.stack_saved_at)
-        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
-    if results_k is not None:
-        if results_k.empty:
-            st.info("No matches found with the current rules.")
-        else:
-            st.success(f"Found {len(results_k)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "ema10_last", "ema25_last", "ema90_last", "market_cap_b", "last_close"]
-            display_df = results_k[display_cols].rename(columns={
-                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
-                "bars_ago": "Candles Ago", "match_time": "Match Time (UTC)",
-                "ema10_last": "EMA10 (now)", "ema25_last": "EMA25 (now)", "ema90_last": "EMA90 (now)",
-                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
-            })
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-            render_charts(results_k.sort_values("market_cap_b", ascending=False), key_prefix="stack")
-    else:
-        st.info("Set your rules above and tap **Run Triple EMA Stack scan**.")
-
-# ========================= TAB 4: EMA10/25 RECLAIM ===========================
+# ========================= TAB 1: EMA10/25 RECLAIM ===========================
 with tab_reclaim:
     st.markdown("Finds stocks where a **bullish candle crosses through both EMA10 and EMA25 and closes strong above both** — both EMA values sit within that candle's high-low range (price traded through them), the candle closes above both, and the close sits near the candle's own high. Scanned from the large-cap universe above.")
 
@@ -1136,7 +915,7 @@ with tab_reclaim:
     else:
         st.info("Set your rules above and tap **Run EMA10/25 Reclaim scan**.")
 
-# ============================== TAB 5: 1H EMA ================================
+# ============================== TAB 2: 1H EMA ================================
 with tab_ema:
     st.markdown("Finds stocks where the **10 EMA crosses above the 90 EMA** within the last N hourly candles, with the **crossover candle closing strong** (close near the high) — scanned from the large-cap universe above.")
 
@@ -1213,3 +992,224 @@ with tab_ema:
             render_charts(results_e.sort_values("market_cap_b", ascending=False), key_prefix="ema")
     else:
         st.info("Set your rules above and tap **Run 1H EMA scan**.")
+       
+# ============================== TAB 3: DAILY ================================
+with tab_daily:
+    st.markdown("Finds stocks with a **red candle yesterday**, **up X% today**, closing strong — scanned from the large-cap universe above.")
+
+    with st.expander("⚙️ Rules", expanded=True):
+        require_red_yesterday = st.checkbox("Yesterday must be down (red)", value=True, key="d_red")
+        min_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=2.0, step=0.5, key="d_pct")
+        min_close_position_pct = st.number_input(
+            "Min close position within today's range (%)", min_value=0.0, max_value=100.0, value=60.0, step=5.0,
+            key="d_close_pos",
+            help="Today's close must sit at least this far up today's low-to-high range.",
+        )
+
+    run_daily = st.button("🔍 Run Daily Reversal scan", type="primary", use_container_width=True, key="run_daily")
+
+    if "daily_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_DAILY)
+        st.session_state.daily_results = df0
+        st.session_state.daily_saved_at = saved_at0
+
+    if run_daily:
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers for price action...")
+
+        progress = st.progress(0.0)
+        matches = scan_daily_reversal(
+            tickers, min_today_pct=min_today_pct, require_red_yesterday=require_red_yesterday,
+            min_close_position=min_close_position_pct / 100.0, progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+
+        rules_used = {
+            "require_red_yesterday": require_red_yesterday, "min_today_pct": min_today_pct,
+            "min_close_position_pct": min_close_position_pct,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+
+        if matches.empty:
+            st.session_state.daily_results = pd.DataFrame()
+            save_results(RESULTS_FILE_DAILY, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="today_pct", sort_asc=False)
+            st.session_state.daily_results = matches
+            synced = save_results(RESULTS_FILE_DAILY, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+
+        st.session_state.daily_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_d = st.session_state.daily_results
+
+    if results_d is not None and not results_d.empty and st.session_state.get("daily_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.daily_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+
+    if results_d is not None:
+        if results_d.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_d)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "yesterday_pct", "today_pct", "close_position_pct", "market_cap_b", "last_close", "volume"]
+            display_df = results_d[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "yesterday_pct": "Yesterday % (Open→Close)", "today_pct": "Today %",
+                "close_position_pct": "Close Position %", "market_cap_b": "Mkt Cap ($B)",
+                "last_close": "Last Close", "volume": "Volume",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_d.sort_values("market_cap_b", ascending=False), key_prefix="daily")
+    else:
+        st.info("Set your rules above and tap **Run Daily Reversal scan**.")
+
+# ========================= TAB 4: STRONG CLOSE TODAY =========================
+with tab_strong:
+    st.markdown("Finds stocks **up X% today** that **closed strong** — strong upward momentum with very little selling pressure into the close. No requirement on yesterday's candle, unlike Daily Reversal — scanned from the large-cap universe above.")
+
+    with st.expander("⚙️ Rules", expanded=True):
+        min_strong_today_pct = st.number_input("Minimum % up today", min_value=0.0, value=3.0, step=0.5, key="s_pct")
+        min_strong_close_position_pct = st.number_input(
+            "Min close position within today's range (%)", min_value=0.0, max_value=100.0, value=80.0, step=5.0,
+            key="s_close_pos",
+            help="Today's close must sit at least this far up today's low-to-high range.",
+        )
+
+    run_strong = st.button("🔍 Run Strong Close scan", type="primary", use_container_width=True, key="run_strong")
+
+    if "strong_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_STRONG)
+        st.session_state.strong_results = df0
+        st.session_state.strong_saved_at = saved_at0
+
+    if run_strong:
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers for price action...")
+
+        progress = st.progress(0.0)
+        matches = scan_strong_close_today(
+            tickers, min_today_pct=min_strong_today_pct,
+            min_close_position=min_strong_close_position_pct / 100.0, progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+
+        rules_used = {
+            "min_today_pct": min_strong_today_pct,
+            "min_close_position_pct": min_strong_close_position_pct,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+
+        if matches.empty:
+            st.session_state.strong_results = pd.DataFrame()
+            save_results(RESULTS_FILE_STRONG, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="today_pct", sort_asc=False)
+            st.session_state.strong_results = matches
+            synced = save_results(RESULTS_FILE_STRONG, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+
+        st.session_state.strong_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_s = st.session_state.strong_results
+
+    if results_s is not None and not results_s.empty and st.session_state.get("strong_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.strong_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+
+    if results_s is not None:
+        if results_s.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_s)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "today_pct", "close_position_pct", "market_cap_b", "last_close", "volume"]
+            display_df = results_s[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "today_pct": "Today %", "close_position_pct": "Close Position %",
+                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close", "volume": "Volume",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_s.sort_values("market_cap_b", ascending=False), key_prefix="strong")
+    else:
+        st.info("Set your rules above and tap **Run Strong Close scan**.")
+
+# ========================= TAB 5: TRIPLE EMA STACK ===========================
+with tab_stack:
+    st.markdown("Finds stocks where **EMA10 > EMA25 > EMA90** (a bullish stack) first forms within the last N hourly candles, with no such alignment in a longer lookback before that — filtering out stocks that just oscillate in and out of alignment. Scanned from the large-cap universe above.")
+
+    with st.expander("⚙️ Rules", expanded=True):
+        stack_lookback_candles = st.number_input(
+            "Alignment must have first formed within the last N hourly candles",
+            min_value=1, value=15, step=1, key="k_lookback",
+        )
+        stack_clean_lookback_candles = st.number_input(
+            "No alignment allowed in the N candles before that",
+            min_value=1, value=70, step=5, key="k_clean_lookback",
+            help="Counting back from the candle where alignment forms, none of these prior candles may have already had EMA10 > EMA25 > EMA90 — this filters out stocks that keep oscillating around the EMAs rather than making a genuinely fresh move.",
+        )
+        st.caption("Uses ~3 months of hourly data so there's enough history for both lookback windows plus a stable 90-period EMA.")
+
+    run_stack = st.button("🔍 Run Triple EMA Stack scan", type="primary", use_container_width=True, key="run_stack")
+
+    if "stack_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_STACK)
+        st.session_state.stack_results = df0
+        st.session_state.stack_saved_at = saved_at0
+
+    if run_stack:
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the 1H chart for a fresh EMA10>EMA25>EMA90 stack (this can take a while — hourly data is heavier than daily)...")
+
+        progress = st.progress(0.0)
+        matches = scan_triple_ema_stack_cross(
+            tickers, lookback_candles=stack_lookback_candles,
+            clean_lookback_candles=stack_clean_lookback_candles,
+            progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+
+        rules_used = {
+            "lookback_candles": stack_lookback_candles,
+            "clean_lookback_candles": stack_clean_lookback_candles,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+
+        if matches.empty:
+            st.session_state.stack_results = pd.DataFrame()
+            save_results(RESULTS_FILE_STACK, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="bars_ago", sort_asc=True)
+            st.session_state.stack_results = matches
+            synced = save_results(RESULTS_FILE_STACK, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+
+        st.session_state.stack_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_k = st.session_state.stack_results
+
+    if results_k is not None and not results_k.empty and st.session_state.get("stack_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.stack_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+
+    if results_k is not None:
+        if results_k.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_k)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "ema10_last", "ema25_last", "ema90_last", "market_cap_b", "last_close"]
+            display_df = results_k[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "bars_ago": "Candles Ago", "match_time": "Match Time (UTC)",
+                "ema10_last": "EMA10 (now)", "ema25_last": "EMA25 (now)", "ema90_last": "EMA90 (now)",
+                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_k.sort_values("market_cap_b", ascending=False), key_prefix="stack")
+    else:
+        st.info("Set your rules above and tap **Run Triple EMA Stack scan**.")
