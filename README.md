@@ -22,15 +22,21 @@ falls back automatically to the full NASDAQ+NYSE symbol list from the
 Nasdaq Trader directory, with a market-cap check per ticker — much slower,
 but keeps the app working.
 
-## 📉 Daily Reversal & 📈 1H EMA Crossover
-Both scanners read the saved large-cap list **as-is** and apply only their
-own price-action rules — they do **not** re-check market cap (that's
+## 📉 Daily Reversal, 💪 Strong Close Today, 🧬 Triple EMA Stack, 🎯 EMA10/25 Reclaim, 📈 1H EMA Crossover, & 🌅 Daily EMA10/200 Cross
+All six scanners read the saved large-cap list **as-is** and apply only
+their own price-action rules — they do **not** re-check market cap (that's
 already been filtered upstream by the universe layer):
 
 - **Daily Reversal**: red candle yesterday (close < open), up X% today
   (default 2%, close-to-close), with today's close in the top portion of
   today's range (default: at least 60% of the way from low to high) so a
   weak bullish candle with a big upper wick doesn't count.
+- **Strong Close Today**: up X% today (default 3%, close-to-close), with
+  today's close in the top portion of today's range (default: at least 80%
+  of the way from low to high). No requirement on yesterday's candle,
+  unlike Daily Reversal — this is just "strong upward momentum with very
+  little selling pressure into the close," regardless of what happened the
+  day before.
 - **1H EMA Crossover**: the 10-period EMA crosses ABOVE the 90-period EMA
   (a genuine crossover event — not just "currently above," which matched
   far too many already-trending stocks) within the last N hourly candles
@@ -41,8 +47,29 @@ already been filtered upstream by the universe layer):
   hourly data. Reports how many candles ago the crossover happened and the
   exact timestamp.
 
+- **Triple EMA Stack**: EMA10 > EMA25 > EMA90 (a fully bullish EMA stack)
+  first forms within the last N hourly candles (default 15), with no such
+  alignment at all in a longer lookback before that (default 70 candles).
+  The second condition filters out stocks that just oscillate in and out
+  of alignment repeatedly — only a genuinely fresh formation, with a clean
+  run-up beforehand, counts.
+
+- **EMA10/25 Reclaim**: within the last N hourly candles (default 7), a
+  bullish candle (close > open) whose low-to-high range contains BOTH the
+  10-period and 25-period EMAs (i.e. price traded through both during that
+  candle), closing above both with the close sitting at least X% (default
+  90%) of the way up its own range — a strong reclaim of both EMAs
+  together, not a weak poke through either one.
+
+- **Daily EMA10/200 Cross**: the 10-day EMA crosses above the 200-day EMA
+  (a "golden cross" on the daily timeframe) within the last N daily bars
+  (default 25) — a pure crossover event, with no close-strength
+  requirement. Uses ~2 years of daily data so the 200-day EMA has enough
+  history to be meaningful.
+
 Each scanner's results are saved separately (`last_scan_daily.json` /
-`last_scan_ema.json`) and reload automatically when you reopen or refresh
+`last_scan_strong.json` / `last_scan_stack.json` / `last_scan_reclaim.json` /
+`last_scan_ema.json` / `last_scan_daily_ema_cross.json`) and reload automatically when you reopen or refresh
 the page — no need to re-scan just to see your last results.
 
 ## Persistence caveat
@@ -55,8 +82,9 @@ the screener, not the tens of minutes a per-ticker approach would take).
 
 ## Making saves permanent with GitHub backup (free, optional)
 
-By default, saved files (`last_scan_daily.json`, `last_scan_ema.json`,
-`large_cap_universe.json`) live only in the app's own temporary storage,
+By default, saved files (`last_scan_daily.json`, `last_scan_strong.json`,
+`last_scan_stack.json`, `last_scan_reclaim.json`, `last_scan_ema.json`,
+`last_scan_daily_ema_cross.json`, `large_cap_universe.json`) live only in the app's own temporary storage,
 which resets if the app's container restarts. To make them genuinely
 permanent, the app can also push every save to a `data/` folder in your
 GitHub repo, and load from there automatically if the local copy is

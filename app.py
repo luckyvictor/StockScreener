@@ -56,6 +56,7 @@ RESULTS_FILE_STRONG = "last_scan_strong.json"
 RESULTS_FILE_EMA = "last_scan_ema.json"
 RESULTS_FILE_STACK = "last_scan_stack.json"
 RESULTS_FILE_RECLAIM = "last_scan_reclaim.json"
+RESULTS_FILE_DAILY_EMA_CROSS = "last_scan_daily_ema_cross.json"
 LARGE_CAP_FILE = "large_cap_universe.json"
 GITHUB_DATA_DIR = "data"
 
@@ -747,6 +748,71 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
 
 
 # ----------------------------------------------------------------------------
+# Scanner: Daily EMA10/200 Cross Up (golden cross on the daily timeframe)
+# ----------------------------------------------------------------------------
+def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_cb=None):
+    """Batch-download daily bars and find tickers where the 10-day EMA
+    crossed ABOVE the 200-day EMA within the last `lookback_days` daily
+    bars. A pure crossover event, no close-position/strength requirement.
+    Reports the most recent such crossover."""
+    matches = []
+    batches = list(chunk(tickers, batch_size))
+    total = len(batches)
+    min_bars_needed = 200 + lookback_days + 10  # enough history for a stable EMA200 plus buffer
+
+    for i, batch in enumerate(batches):
+        try:
+            data = yf.download(
+                tickers=" ".join(batch), period="2y", interval="1d",
+                group_by="ticker", threads=True, progress=False, auto_adjust=False,
+            )
+        except Exception:
+            data = None
+
+        if data is not None and not data.empty:
+            for t in batch:
+                try:
+                    sub = data if len(batch) == 1 else (data[t] if t in data.columns.get_level_values(0) else None)
+                    if sub is None:
+                        continue
+                    closes = sub["Close"].dropna()
+                    if len(closes) < min_bars_needed:
+                        continue
+
+                    ema10 = closes.ewm(span=10, adjust=False).mean()
+                    ema200 = closes.ewm(span=200, adjust=False).mean()
+                    diff = ema10 - ema200
+                    n = len(closes)
+                    lookback = min(lookback_days, n - 1)
+                    start = n - lookback
+
+                    match_idx = None
+                    for idx in range(n - 1, start - 1, -1):
+                        prev_diff, curr_diff = diff.iloc[idx - 1], diff.iloc[idx]
+                        if prev_diff < 0 and curr_diff >= 0:
+                            match_idx = idx
+                            break
+
+                    if match_idx is not None:
+                        bars_ago = (n - 1) - match_idx
+                        matches.append({
+                            "symbol": t,
+                            "bars_ago": int(bars_ago),
+                            "match_time": str(closes.index[match_idx].date()),
+                            "ema10_last": round(float(ema10.iloc[-1]), 2),
+                            "ema200_last": round(float(ema200.iloc[-1]), 2),
+                            "last_close": round(float(closes.iloc[-1]), 2),
+                        })
+                except Exception:
+                    continue
+
+        if progress_cb:
+            progress_cb((i + 1) / total)
+
+    return pd.DataFrame(matches)
+
+
+# ----------------------------------------------------------------------------
 # Shared UI helpers
 # ----------------------------------------------------------------------------
 def render_charts(results_sorted_df, key_prefix):
@@ -834,7 +900,7 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
     else:
         st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
-tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack = st.tabs(["🎯 EMA10/25 Reclaim", "📈 1H EMA Crossover", "📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack"])
+tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack, tab_daily_ema_cross = st.tabs(["🎯 EMA10/25 Reclaim", "📈 1H EMA Crossover", "📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🌅 Daily EMA10/200 Cross"])
 
 # ========================= TAB 1: EMA10/25 RECLAIM ===========================
 with tab_reclaim:
@@ -1213,3 +1279,73 @@ with tab_stack:
             render_charts(results_k.sort_values("market_cap_b", ascending=False), key_prefix="stack")
     else:
         st.info("Set your rules above and tap **Run Triple EMA Stack scan**.")
+
+# ========================= TAB 6: DAILY EMA10/200 CROSS =======================
+with tab_daily_ema_cross:
+    st.markdown("Finds stocks where the **10-day EMA crosses above the 200-day EMA** (a golden cross on the daily timeframe) within the last N daily bars — scanned from the large-cap universe above.")
+
+    with st.expander("⚙️ Rules", expanded=True):
+        daily_ema_lookback_days = st.number_input(
+            "Crossover must have happened within the last N daily bars",
+            min_value=1, value=25, step=1, key="de_lookback",
+        )
+        st.caption("Uses ~2 years of daily data so the 200-day EMA has enough history to be meaningful.")
+
+    run_daily_ema_cross = st.button("🔍 Run Daily EMA10/200 Cross scan", type="primary", use_container_width=True, key="run_daily_ema_cross")
+
+    if "daily_ema_cross_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_DAILY_EMA_CROSS)
+        st.session_state.daily_ema_cross_results = df0
+        st.session_state.daily_ema_cross_saved_at = saved_at0
+
+    if run_daily_ema_cross:
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the daily chart for an EMA10/200 cross...")
+
+        progress = st.progress(0.0)
+        matches = scan_daily_ema10_200_cross(
+            tickers, lookback_days=daily_ema_lookback_days,
+            progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+
+        rules_used = {
+            "lookback_days": daily_ema_lookback_days,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+
+        if matches.empty:
+            st.session_state.daily_ema_cross_results = pd.DataFrame()
+            save_results(RESULTS_FILE_DAILY_EMA_CROSS, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="bars_ago", sort_asc=True)
+            st.session_state.daily_ema_cross_results = matches
+            synced = save_results(RESULTS_FILE_DAILY_EMA_CROSS, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+
+        st.session_state.daily_ema_cross_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_de = st.session_state.daily_ema_cross_results
+
+    if results_de is not None and not results_de.empty and st.session_state.get("daily_ema_cross_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.daily_ema_cross_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+
+    if results_de is not None:
+        if results_de.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_de)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "ema10_last", "ema200_last", "market_cap_b", "last_close"]
+            display_df = results_de[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "bars_ago": "Bars Ago", "match_time": "Match Date",
+                "ema10_last": "EMA10 (now)", "ema200_last": "EMA200 (now)",
+                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_de.sort_values("market_cap_b", ascending=False), key_prefix="daily_ema_cross")
+    else:
+        st.info("Set your rules above and tap **Run Daily EMA10/200 Cross scan**.")
