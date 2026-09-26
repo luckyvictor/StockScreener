@@ -557,12 +557,13 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
                         o, c, h, l = opens.iloc[idx], closes.iloc[idx], highs.iloc[idx], lows.iloc[idx]
                         e10, e25 = ema10.iloc[idx], ema25.iloc[idx]
                         bullish = c > o
+                        upstack = e10 > e25
                         crosses_ema10 = l <= e10 <= h
                         crosses_ema25 = l <= e25 <= h
                         closes_above_both = c > e10 and c > e25
                         candle_range = h - l
                         close_pos = (c - l) / candle_range if candle_range > 0 else 1.0
-                        if bullish and crosses_ema10 and crosses_ema25 and closes_above_both and close_pos >= min_close_position:
+                        if bullish and upstack and crosses_ema10 and crosses_ema25 and closes_above_both and close_pos >= min_close_position:
                             match_idx = idx
                             match_close_pos = close_pos
                             break
