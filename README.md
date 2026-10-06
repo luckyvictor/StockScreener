@@ -22,8 +22,8 @@ falls back automatically to the full NASDAQ+NYSE symbol list from the
 Nasdaq Trader directory, with a market-cap check per ticker — much slower,
 but keeps the app working.
 
-## 📉 Daily Reversal, 💪 Strong Close Today, 🧬 Triple EMA Stack, 🎯 EMA10/25 Reclaim, 📈 1H EMA Crossover, & 🌅 Daily EMA10/200 Cross
-All six scanners read the saved large-cap list **as-is** and apply only
+## 📉 Daily Reversal, 💪 Strong Close Today, 🧬 Triple EMA Stack, 🎯 EMA Reclaim, 📈 1H EMA Crossover, 🌅 Daily EMA10/200 Cross, & 👆 Daily EMA Touch
+All seven scanners read the saved large-cap list **as-is** and apply only
 their own price-action rules — they do **not** re-check market cap (that's
 already been filtered upstream by the universe layer):
 
@@ -54,22 +54,31 @@ already been filtered upstream by the universe layer):
   of alignment repeatedly — only a genuinely fresh formation, with a clean
   run-up beforehand, counts.
 
-- **EMA10/25 Reclaim**: within the last N hourly candles (default 7), a
-  bullish candle (close > open) whose low-to-high range contains BOTH the
-  10-period and 25-period EMAs (i.e. price traded through both during that
-  candle), closing above both with the close sitting at least X% (default
-  90%) of the way up its own range — a strong reclaim of both EMAs
-  together, not a weak poke through either one.
+- **EMA Reclaim**: within the last N candles, a bullish candle (close >
+  open) whose low-to-high range contains BOTH a fast and a slow EMA (i.e.
+  price traded through both during that candle), closing above both with
+  the close sitting at least X% of the way up its own range — a strong
+  reclaim of both EMAs together, not a weak poke through either one. The
+  fast/slow EMA periods, the timeframe (15m/30m/1h/1d), the lookback, and
+  the close-position threshold are all configurable in the app. Whatever
+  you last ran with is remembered as the new default — including across
+  app restarts, since it's saved the same way as scan results (local file,
+  GitHub-backed up if configured).
 
 - **Daily EMA10/200 Cross**: the 10-day EMA crosses above the 200-day EMA
   (a "golden cross" on the daily timeframe) within the last N daily bars
   (default 25) — a pure crossover event, with no close-strength
   requirement. Uses ~2 years of daily data so the 200-day EMA has enough
   history to be meaningful.
+- **Daily EMA Touch**: within the last N daily candles (default 5), price
+  touched a daily EMA (default 25-period, both numbers configurable) — any
+  of that candle's High/Low/Open/Close sits at the EMA value, which is
+  equivalent to the EMA falling within the candle's low-to-high range. No
+  direction or close-strength requirement, purely a proximity check.
 
 Each scanner's results are saved separately (`last_scan_daily.json` /
 `last_scan_strong.json` / `last_scan_stack.json` / `last_scan_reclaim.json` /
-`last_scan_ema.json` / `last_scan_daily_ema_cross.json`) and reload automatically when you reopen or refresh
+`last_scan_ema.json` / `last_scan_daily_ema_cross.json` / `last_scan_touch.json`) and reload automatically when you reopen or refresh
 the page — no need to re-scan just to see your last results.
 
 ## Persistence caveat
@@ -84,7 +93,7 @@ the screener, not the tens of minutes a per-ticker approach would take).
 
 By default, saved files (`last_scan_daily.json`, `last_scan_strong.json`,
 `last_scan_stack.json`, `last_scan_reclaim.json`, `last_scan_ema.json`,
-`last_scan_daily_ema_cross.json`, `large_cap_universe.json`) live only in the app's own temporary storage,
+`last_scan_daily_ema_cross.json`, `last_scan_touch.json`, `large_cap_universe.json`) live only in the app's own temporary storage,
 which resets if the app's container restarts. To make them genuinely
 permanent, the app can also push every save to a `data/` folder in your
 GitHub repo, and load from there automatically if the local copy is

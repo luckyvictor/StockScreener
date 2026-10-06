@@ -57,8 +57,20 @@ RESULTS_FILE_EMA = "last_scan_ema.json"
 RESULTS_FILE_STACK = "last_scan_stack.json"
 RESULTS_FILE_RECLAIM = "last_scan_reclaim.json"
 RESULTS_FILE_DAILY_EMA_CROSS = "last_scan_daily_ema_cross.json"
+RESULTS_FILE_TOUCH = "last_scan_touch.json"
 LARGE_CAP_FILE = "large_cap_universe.json"
+RECLAIM_SETTINGS_FILE = "reclaim_settings.json"
 GITHUB_DATA_DIR = "data"
+
+# Timeframe choices for the EMA Reclaim scanner: label -> (yfinance interval, download period).
+# Periods are chosen conservatively within Yahoo's own limits for each interval
+# (15m/30m data is only available for the last ~60 days; daily has no such limit).
+RECLAIM_TIMEFRAME_OPTIONS = {
+    "15 minutes": ("15m", "1mo"),
+    "30 minutes": ("30m", "1mo"),
+    "1 hour": ("60m", "3mo"),
+    "1 day": ("1d", "2y"),
+}
 
 
 def get_github_config():
@@ -190,6 +202,35 @@ def load_large_cap_list():
         except Exception:
             pass
     return None, None
+
+
+def save_scanner_settings(path, settings):
+    """Generic settings saver (same local-then-GitHub pattern as results).
+    Used to remember a scanner's configuration as the new default, so it
+    doesn't reset to hardcoded values on your next visit."""
+    json_str = json.dumps(settings)
+    with open(path, "w") as f:
+        f.write(json_str)
+    return github_put_file(f"{GITHUB_DATA_DIR}/{path}", json_str, f"Update {path}")
+
+
+def load_scanner_settings(path):
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    content, _ = github_get_file(f"{GITHUB_DATA_DIR}/{path}")
+    if content:
+        try:
+            settings = json.loads(content)
+            with open(path, "w") as f:
+                f.write(content)
+            return settings
+        except Exception:
+            pass
+    return None
 
 
 def chunk(lst, size):
@@ -504,16 +545,16 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
 
 
 # ----------------------------------------------------------------------------
-# Scanner: 1H EMA10/25 Reclaim (bullish candle crosses through BOTH EMA10
-# and EMA25, closes strong above both)
+# Scanner: EMA Reclaim (bullish candle crosses through BOTH a fast and a
+# slow EMA, closes strong above both) — EMA periods and timeframe configurable
 # ----------------------------------------------------------------------------
-def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size=150, progress_cb=None):
-    """Batch-download hourly bars and find tickers where, within the last
-    `lookback_candles` hourly bars, some candle:
+def scan_ema_reclaim(tickers, lookback_candles, min_close_position, ema_fast, ema_slow, interval, period, batch_size=150, progress_cb=None):
+    """Batch-download bars at the given interval and find tickers where,
+    within the last `lookback_candles` bars, some candle:
     - is bullish (close > open),
-    - "crosses" BOTH EMA10 and EMA25 — both EMA values sit within that
-      candle's low-to-high range (i.e. price traded through both during
-      the candle), and
+    - "crosses" BOTH EMAs (ema_fast and ema_slow periods) — both EMA
+      values sit within that candle's low-to-high range (i.e. price
+      traded through both during the candle), and
     - closes above both EMAs, with the close sitting at least
       min_close_position (0-1) of the way up its own low-to-high range —
       a strong reclaim, not just a weak poke through the lines.
@@ -521,12 +562,12 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-    min_bars_needed = 25 * 3 + lookback_candles + 10  # enough history for a stable EMA25 plus buffer
+    min_bars_needed = ema_slow * 3 + lookback_candles + 10  # enough history for a stable slow EMA plus buffer
 
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
-                tickers=" ".join(batch), period="1mo", interval="60m",
+                tickers=" ".join(batch), period=period, interval=interval,
                 group_by="ticker", threads=True, progress=False, auto_adjust=False,
             )
         except Exception:
@@ -545,8 +586,8 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
                     if min(len(closes), len(opens), len(highs), len(lows)) < min_bars_needed:
                         continue
 
-                    ema10 = closes.ewm(span=10, adjust=False).mean()
-                    ema25 = closes.ewm(span=25, adjust=False).mean()
+                    ema_fast_s = closes.ewm(span=ema_fast, adjust=False).mean()
+                    ema_slow_s = closes.ewm(span=ema_slow, adjust=False).mean()
                     n = len(closes)
                     lookback = min(lookback_candles, n)
                     start = n - lookback
@@ -555,15 +596,14 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
                     match_close_pos = None
                     for idx in range(n - 1, start - 1, -1):
                         o, c, h, l = opens.iloc[idx], closes.iloc[idx], highs.iloc[idx], lows.iloc[idx]
-                        e10, e25 = ema10.iloc[idx], ema25.iloc[idx]
+                        ef, es = ema_fast_s.iloc[idx], ema_slow_s.iloc[idx]
                         bullish = c > o
-                        upstack = e10 > e25
-                        crosses_ema10 = l <= e10 <= h
-                        crosses_ema25 = l <= e25 <= h
-                        closes_above_both = c > e10 and c > e25
+                        crosses_fast = l <= ef <= h
+                        crosses_slow = l <= es <= h
+                        closes_above_both = c > ef and c > es
                         candle_range = h - l
                         close_pos = (c - l) / candle_range if candle_range > 0 else 1.0
-                        if bullish and upstack and crosses_ema10 and crosses_ema25 and closes_above_both and close_pos >= min_close_position:
+                        if bullish and crosses_fast and crosses_slow and closes_above_both and close_pos >= min_close_position:
                             match_idx = idx
                             match_close_pos = close_pos
                             break
@@ -575,10 +615,10 @@ def scan_ema25_reclaim(tickers, lookback_candles, min_close_position, batch_size
                             "bars_ago": int(bars_ago),
                             "match_time": str(closes.index[match_idx]),
                             "close_position_pct": round(match_close_pos * 100, 1),
-                            "ema10_at_match": round(float(ema10.iloc[match_idx]), 2),
-                            "ema25_at_match": round(float(ema25.iloc[match_idx]), 2),
-                            "ema10_last": round(float(ema10.iloc[-1]), 2),
-                            "ema25_last": round(float(ema25.iloc[-1]), 2),
+                            "ema_fast_at_match": round(float(ema_fast_s.iloc[match_idx]), 2),
+                            "ema_slow_at_match": round(float(ema_slow_s.iloc[match_idx]), 2),
+                            "ema_fast_last": round(float(ema_fast_s.iloc[-1]), 2),
+                            "ema_slow_last": round(float(ema_slow_s.iloc[-1]), 2),
                             "last_close": round(float(closes.iloc[-1]), 2),
                         })
                 except Exception:
@@ -814,6 +854,75 @@ def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_
 
 
 # ----------------------------------------------------------------------------
+# Scanner: Daily EMA Touch (price touches a daily EMA within recent candles
+# — no directional/strength requirement, just proximity)
+# ----------------------------------------------------------------------------
+def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, progress_cb=None):
+    """Batch-download daily bars and find tickers where, within the last
+    `lookback_candles` daily bars, some candle's range contains the
+    `ema_period`-day EMA — i.e. the EMA value sits between that candle's
+    low and high (which covers all of its Open/High/Low/Close, since every
+    candle's O and C already fall within its own L-H range). No
+    bullish/bearish or close-strength requirement — this is purely a
+    "price touched the EMA" check. Reports the most recent such candle."""
+    matches = []
+    batches = list(chunk(tickers, batch_size))
+    total = len(batches)
+    min_bars_needed = ema_period * 3 + lookback_candles + 10  # enough history for a stable EMA plus buffer
+
+    for i, batch in enumerate(batches):
+        try:
+            data = yf.download(
+                tickers=" ".join(batch), period="2y", interval="1d",
+                group_by="ticker", threads=True, progress=False, auto_adjust=False,
+            )
+        except Exception:
+            data = None
+
+        if data is not None and not data.empty:
+            for t in batch:
+                try:
+                    sub = data if len(batch) == 1 else (data[t] if t in data.columns.get_level_values(0) else None)
+                    if sub is None:
+                        continue
+                    closes = sub["Close"].dropna()
+                    highs = sub["High"].dropna()
+                    lows = sub["Low"].dropna()
+                    if min(len(closes), len(highs), len(lows)) < min_bars_needed:
+                        continue
+
+                    ema = closes.ewm(span=ema_period, adjust=False).mean()
+                    n = len(closes)
+                    lookback = min(lookback_candles, n)
+                    start = n - lookback
+
+                    match_idx = None
+                    for idx in range(n - 1, start - 1, -1):
+                        h, l, e = highs.iloc[idx], lows.iloc[idx], ema.iloc[idx]
+                        if l <= e <= h:
+                            match_idx = idx
+                            break
+
+                    if match_idx is not None:
+                        bars_ago = (n - 1) - match_idx
+                        matches.append({
+                            "symbol": t,
+                            "bars_ago": int(bars_ago),
+                            "match_time": str(closes.index[match_idx].date()),
+                            "ema_at_match": round(float(ema.iloc[match_idx]), 2),
+                            "ema_last": round(float(ema.iloc[-1]), 2),
+                            "last_close": round(float(closes.iloc[-1]), 2),
+                        })
+                except Exception:
+                    continue
+
+        if progress_cb:
+            progress_cb((i + 1) / total)
+
+    return pd.DataFrame(matches)
+
+
+# ----------------------------------------------------------------------------
 # Shared UI helpers
 # ----------------------------------------------------------------------------
 def render_charts(results_sorted_df, key_prefix):
@@ -901,25 +1010,47 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
     else:
         st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
-tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack, tab_daily_ema_cross = st.tabs(["🎯 EMA10/25 Reclaim", "📈 1H EMA Crossover", "📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🌅 Daily EMA10/200 Cross"])
+tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack, tab_daily_ema_cross, tab_touch = st.tabs(["🎯 EMA Reclaim", "📈 1H EMA Crossover", "📉 Daily Reversal", "💪 Strong Close Today", "🧬 Triple EMA Stack", "🌅 Daily EMA10/200 Cross", "👆 Daily EMA Touch"])
 
-# ========================= TAB 1: EMA10/25 RECLAIM ===========================
+# ========================= TAB 1: EMA RECLAIM =================================
 with tab_reclaim:
-    st.markdown("Finds stocks where a **bullish candle crosses through both EMA10 and EMA25 and closes strong above both** — both EMA values sit within that candle's high-low range (price traded through them), the candle closes above both, and the close sits near the candle's own high. Scanned from the large-cap universe above.")
+    # Load saved settings once per session (falls back to these original
+    # defaults the very first time, or if nothing's been saved yet).
+    if "r_fast_period" not in st.session_state:
+        saved_settings = load_scanner_settings(RECLAIM_SETTINGS_FILE) or {}
+        st.session_state["r_fast_period"] = saved_settings.get("fast_period", 10)
+        st.session_state["r_slow_period"] = saved_settings.get("slow_period", 25)
+        st.session_state["r_timeframe"] = saved_settings.get("timeframe", "1 hour")
+        st.session_state["r_lookback"] = saved_settings.get("lookback_candles", 3)
+        st.session_state["r_close_pos"] = saved_settings.get("min_close_position_pct", 85.0)
 
     with st.expander("⚙️ Rules", expanded=True):
-        reclaim_lookback_candles = st.number_input(
-            "Must have happened within the last N hourly candles",
-            min_value=1, value=3, step=1, key="r_lookback",
-        )
-        min_reclaim_close_position_pct = st.number_input(
-            "Min close position within that candle's range (%)",
-            min_value=0.0, max_value=100.0, value=85.0, step=5.0, key="r_close_pos",
-            help="The reclaim candle's close must sit at least this far up its own low-to-high range.",
-        )
-        st.caption("Uses ~1 month of hourly data — enough history for stable 10- and 25-period EMAs.")
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            reclaim_fast_period = st.number_input("Fast EMA period", min_value=1, step=1, key="r_fast_period")
+            reclaim_slow_period = st.number_input("Slow EMA period", min_value=2, step=1, key="r_slow_period")
+            reclaim_timeframe = st.selectbox("Timeframe", list(RECLAIM_TIMEFRAME_OPTIONS.keys()), key="r_timeframe")
+        with rc2:
+            reclaim_lookback_candles = st.number_input(
+                "Must have happened within the last N candles",
+                min_value=1, step=1, key="r_lookback",
+            )
+            min_reclaim_close_position_pct = st.number_input(
+                "Min close position within that candle's range (%)",
+                min_value=0.0, max_value=100.0, step=5.0, key="r_close_pos",
+                help="The reclaim candle's close must sit at least this far up its own low-to-high range.",
+            )
 
-    run_reclaim = st.button("🔍 Run EMA10/25 Reclaim scan", type="primary", use_container_width=True, key="run_reclaim")
+    reclaim_interval, reclaim_period = RECLAIM_TIMEFRAME_OPTIONS[reclaim_timeframe]
+    st.markdown(
+        f"Finds stocks where a **bullish candle crosses through both EMA{reclaim_fast_period} and EMA{reclaim_slow_period} "
+        f"and closes strong above both** on the **{reclaim_timeframe}** timeframe — both EMA values sit within that candle's "
+        f"high-low range (price traded through them), the candle closes above both, and the close sits at least "
+        f"{min_reclaim_close_position_pct:.0f}% up the candle's own range. Must have happened within the last "
+        f"{reclaim_lookback_candles} candles. Scanned from the large-cap universe above."
+    )
+
+    run_reclaim = st.button(f"🔍 Run EMA{reclaim_fast_period}/{reclaim_slow_period} Reclaim scan", type="primary", use_container_width=True, key="run_reclaim")
 
     if "reclaim_results" not in st.session_state:
         df0, saved_at0, rules0 = load_results(RESULTS_FILE_RECLAIM)
@@ -927,19 +1058,33 @@ with tab_reclaim:
         st.session_state.reclaim_saved_at = saved_at0
 
     if run_reclaim:
+        # Remember this configuration as the new default for next time.
+        save_scanner_settings(RECLAIM_SETTINGS_FILE, {
+            "fast_period": reclaim_fast_period,
+            "slow_period": reclaim_slow_period,
+            "timeframe": reclaim_timeframe,
+            "lookback_candles": reclaim_lookback_candles,
+            "min_close_position_pct": min_reclaim_close_position_pct,
+        })
+
         universe, universe_meta = ensure_universe_loaded()
         tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the 1H chart for an EMA25 reclaim...")
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the {reclaim_timeframe} chart for an EMA{reclaim_fast_period}/{reclaim_slow_period} reclaim...")
 
         progress = st.progress(0.0)
-        matches = scan_ema25_reclaim(
+        matches = scan_ema_reclaim(
             tickers, lookback_candles=reclaim_lookback_candles,
             min_close_position=min_reclaim_close_position_pct / 100.0,
+            ema_fast=reclaim_fast_period, ema_slow=reclaim_slow_period,
+            interval=reclaim_interval, period=reclaim_period,
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
 
         rules_used = {
+            "fast_period": reclaim_fast_period,
+            "slow_period": reclaim_slow_period,
+            "timeframe": reclaim_timeframe,
             "lookback_candles": reclaim_lookback_candles,
             "min_close_position_pct": min_reclaim_close_position_pct,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
@@ -968,19 +1113,19 @@ with tab_reclaim:
             st.info("No matches found with the current rules.")
         else:
             st.success(f"Found {len(results_r)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "close_position_pct", "ema10_at_match", "ema25_at_match", "ema10_last", "ema25_last", "market_cap_b", "last_close"]
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "close_position_pct", "ema_fast_at_match", "ema_slow_at_match", "ema_fast_last", "ema_slow_last", "market_cap_b", "last_close"]
             display_df = results_r[display_cols].rename(columns={
                 "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
                 "bars_ago": "Candles Ago", "match_time": "Match Time (UTC)",
                 "close_position_pct": "Close Position %",
-                "ema10_at_match": "EMA10 (at match)", "ema25_at_match": "EMA25 (at match)",
-                "ema10_last": "EMA10 (now)", "ema25_last": "EMA25 (now)",
+                "ema_fast_at_match": "EMA Fast (at match)", "ema_slow_at_match": "EMA Slow (at match)",
+                "ema_fast_last": "EMA Fast (now)", "ema_slow_last": "EMA Slow (now)",
                 "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
             })
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             render_charts(results_r.sort_values("market_cap_b", ascending=False), key_prefix="reclaim")
     else:
-        st.info("Set your rules above and tap **Run EMA10/25 Reclaim scan**.")
+        st.info("Set your rules above and tap **Run Reclaim scan**.")
 
 # ============================== TAB 2: 1H EMA ================================
 with tab_ema:
@@ -1350,3 +1495,75 @@ with tab_daily_ema_cross:
             render_charts(results_de.sort_values("market_cap_b", ascending=False), key_prefix="daily_ema_cross")
     else:
         st.info("Set your rules above and tap **Run Daily EMA10/200 Cross scan**.")
+
+# ========================= TAB 7: DAILY EMA TOUCH ============================
+with tab_touch:
+    st.markdown("Finds stocks where, within the recent N daily candles, price **touched the EMA** — any of that candle's High/Low/Open/Close sits at the EMA value (equivalently, the EMA falls within the candle's low-to-high range). No direction or strength requirement, just proximity. Scanned from the large-cap universe above.")
+
+    with st.expander("⚙️ Rules", expanded=True):
+        touch_ema_period = st.number_input("EMA period", min_value=1, value=25, step=1, key="t_ema_period")
+        touch_lookback_candles = st.number_input(
+            "Must have happened within the last N daily candles",
+            min_value=1, value=5, step=1, key="t_lookback",
+        )
+        st.caption("Uses ~2 years of daily data so the EMA has enough history to be meaningful.")
+
+    run_touch = st.button(f"🔍 Run Daily EMA{touch_ema_period} Touch scan", type="primary", use_container_width=True, key="run_touch")
+
+    if "touch_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_TOUCH)
+        st.session_state.touch_results = df0
+        st.session_state.touch_saved_at = saved_at0
+
+    if run_touch:
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the daily chart for an EMA{touch_ema_period} touch...")
+
+        progress = st.progress(0.0)
+        matches = scan_daily_ema_touch(
+            tickers, lookback_candles=touch_lookback_candles, ema_period=touch_ema_period,
+            progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+
+        rules_used = {
+            "ema_period": touch_ema_period,
+            "lookback_candles": touch_lookback_candles,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+
+        if matches.empty:
+            st.session_state.touch_results = pd.DataFrame()
+            save_results(RESULTS_FILE_TOUCH, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="bars_ago", sort_asc=True)
+            st.session_state.touch_results = matches
+            synced = save_results(RESULTS_FILE_TOUCH, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+
+        st.session_state.touch_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_t = st.session_state.touch_results
+
+    if results_t is not None and not results_t.empty and st.session_state.get("touch_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.touch_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+
+    if results_t is not None:
+        if results_t.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_t)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "ema_at_match", "ema_last", "market_cap_b", "last_close"]
+            display_df = results_t[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "bars_ago": "Bars Ago", "match_time": "Match Date",
+                "ema_at_match": "EMA (at match)", "ema_last": "EMA (now)",
+                "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_t.sort_values("market_cap_b", ascending=False), key_prefix="touch")
+    else:
+        st.info("Set your rules above and tap **Run Daily EMA Touch scan**.")
