@@ -5,33 +5,29 @@ Two-layer design:
 
 1. Large-cap universe: a list of NASDAQ + NYSE tickers filtered ONLY by
    market cap (default > $10B), fetched via Yahoo Finance's own bulk
-   screener and saved to disk. You refresh this manually, whenever you
-   want (monthly is plenty — market cap doesn't move fast).
+   screener and saved to disk. Refresh manually whenever you want
+   (monthly is plenty — market cap doesn't move fast).
 
-2. Pattern scanners (Daily Reversal, 1H EMA Crossover, ...) read that
-   saved list as-is and only apply their own price-action rules — they
-   do NOT re-check market cap. If no list has been saved yet, a scanner
-   will build one automatically (using the current market cap threshold
-   shown in the universe panel) before scanning.
+2. Pattern scanners read that saved list as-is and only apply their own
+   price-action rules — they do NOT re-check market cap. If no list has
+   been saved yet, a scanner will build one automatically (using the
+   current market cap threshold shown in the universe panel).
 
 Each scanner's results are saved separately and reload automatically on
-refresh, so nothing needs to be re-run just to look at your last results.
-Charts are pulled from Finviz rather than plotted here.
+refresh. Charts are pulled from Finviz rather than plotted here.
 
 Run locally:
     streamlit run app.py
 
 Deploy for phone use:
     push this folder to a GitHub repo and deploy for free on
-    https://share.streamlit.io (Streamlit Community Cloud). Open the
-    resulting URL in your Android browser and use "Add to Home Screen"
-    for an app-like icon.
+    https://share.streamlit.io (Streamlit Community Cloud).
 
-CONFIRMED-CANDLE MODE (new):
-    While the US market is OPEN, the last bar of any intraday download
-    is a still-forming candle. All scanners strip that forming candle
-    automatically, so every rule runs on confirmed, closed candles only.
-    When the market is closed, nothing is dropped.
+CONFIRMED-CANDLE MODE:
+    While the US market is OPEN, the last bar of any download (any
+    interval) is a still-forming candle. All scanners strip that forming
+    candle automatically, so every rule runs on confirmed, closed
+    candles only. When the market is closed, nothing is dropped.
 """
 
 import io
@@ -52,7 +48,7 @@ st.set_page_config(page_title="Reversal Scanner", layout="wide", page_icon="📈
 ALL_EXCHANGES = ["NASDAQ", "NYSE", "NYSE American"]
 
 # ----------------------------------------------------------------------------
-# Persistence: scan results (per scanner) and the large-cap universe.
+# Persistence
 # ----------------------------------------------------------------------------
 
 RESULTS_FILE_DAILY = "last_scan_daily.json"
@@ -66,7 +62,6 @@ LARGE_CAP_FILE = "large_cap_universe.json"
 RECLAIM_SETTINGS_FILE = "reclaim_settings.json"
 GITHUB_DATA_DIR = "data"
 
-# Timeframe choices for the EMA Reclaim scanner.
 RECLAIM_TIMEFRAME_OPTIONS = {
     "15 minutes": ("15m", "1mo"),
     "30 minutes": ("30m", "1mo"),
@@ -127,7 +122,12 @@ def github_put_file(path_in_repo, content_str, message):
         }
         if sha:
             payload["sha"] = sha
-        r = requests.put(url, json=payload, headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}, timeout=15)
+        r = requests.put(
+            url,
+            json=payload,
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+            timeout=15,
+        )
         return r.status_code in (200, 201)
     except Exception:
         return False
@@ -225,9 +225,7 @@ def chunk(lst, size):
 
 
 # ----------------------------------------------------------------------------
-# Confirmed-candle handling: while the US market is OPEN, the last bar of any
-# download (any interval) is still forming. Every scanner strips that forming
-# candle so all pattern logic runs only on confirmed, closed candles.
+# Confirmed-candle handling
 # ----------------------------------------------------------------------------
 
 ET = ZoneInfo("America/New_York")
@@ -252,7 +250,7 @@ def strip_forming_candle(sub, ticker_label=""):
 
 
 # ----------------------------------------------------------------------------
-# Large-cap universe source #1 (primary): Yahoo's own bulk screener.
+# Large-cap universe source #1 (primary): Yahoo's bulk screener
 # ----------------------------------------------------------------------------
 
 YF_EXCHANGE_MAP = {
@@ -308,7 +306,7 @@ def fetch_large_cap_via_screener(min_cap_b):
 
 
 # ----------------------------------------------------------------------------
-# Large-cap universe source #2 (fallback): full symbol list + per-ticker caps.
+# Large-cap universe source #2 (fallback)
 # ----------------------------------------------------------------------------
 
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
@@ -405,7 +403,7 @@ def finviz_urls(symbol):
 
 
 # ----------------------------------------------------------------------------
-# Scanner 1: Daily Reversal
+# Scanner: Daily Reversal
 # ----------------------------------------------------------------------------
 
 def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close_position, batch_size=150, progress_cb=None):
@@ -848,14 +846,28 @@ def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_
 
 
 # ----------------------------------------------------------------------------
-# Scanner: Daily EMA Touch
+# Scanner: Daily EMA Touch (with bounce filter)
 # ----------------------------------------------------------------------------
 
 def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, progress_cb=None):
+    """Find tickers where, within the last `lookback_candles` CONFIRMED daily bars,
+    some candle's range contains the `ema_period`-day EMA (the EMA value sits between
+    that candle's low and high).
+
+    Bounce filter: if the most recent touch happened on the latest candle
+    (bars_ago == 0), the stock is returned as-is — the touch is fresh and any
+    bounce hasn't happened yet. If the touch happened on an OLDER candle, the
+    stock only qualifies if the NEXT immediate candle after the touch closed
+    bullish (close > open) — i.e. the bounce actually happened. A touch
+    followed by further downside (bearish next candle) is filtered out as a
+    pullback turning into a downtrend.
+    """
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-    min_bars_needed = ema_period * 3 + lookback_candles + 11
+    # +2 extra: one for the possible forming-candle strip, one because we need
+    # the candle AFTER the touch to exist for the bounce check.
+    min_bars_needed = ema_period * 3 + lookback_candles + 12
 
     for i, batch in enumerate(batches):
         try:
@@ -880,9 +892,10 @@ def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, 
                     sub = strip_forming_candle(sub, t)
 
                     closes = sub["Close"].dropna()
+                    opens = sub["Open"].dropna()
                     highs = sub["High"].dropna()
                     lows = sub["Low"].dropna()
-                    if min(len(closes), len(highs), len(lows)) < min_bars_needed:
+                    if min(len(closes), len(opens), len(highs), len(lows)) < min_bars_needed:
                         continue
 
                     ema = closes.ewm(span=ema_period, adjust=False).mean()
@@ -898,16 +911,38 @@ def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, 
                             match_idx = idx
                             break
 
-                    if match_idx is not None:
-                        bars_ago = (n - 1) - match_idx
-                        matches.append({
-                            "symbol": t,
-                            "bars_ago": int(bars_ago),
-                            "match_time": str(closes.index[match_idx].date()),
-                            "ema_at_match": round(float(ema.iloc[match_idx]), 2),
-                            "ema_last": round(float(ema.iloc[-1]), 2),
-                            "last_close": round(float(closes.iloc[-1]), 2),
-                        })
+                    if match_idx is None:
+                        continue
+
+                    bars_ago = (n - 1) - match_idx
+
+                    # Fresh touch (most recent confirmed candle): accept as-is,
+                    # the bounce hasn't had a chance to happen yet.
+                    if bars_ago == 0:
+                        next_bullish = None  # no next candle yet
+                    else:
+                        # Bounce check: the immediate next candle must be bullish.
+                        if match_idx + 1 >= n:
+                            continue
+                        next_open = opens.iloc[match_idx + 1]
+                        next_close = closes.iloc[match_idx + 1]
+                        next_bullish = bool(next_close > next_open)
+                        if not next_bullish:
+                            continue  # touched EMA but kept falling — pullback, skip
+
+                    matches.append({
+                        "symbol": t,
+                        "bars_ago": int(bars_ago),
+                        "match_time": str(closes.index[match_idx].date()),
+                        "next_candle_bullish": next_bullish,
+                        "next_candle_pct": (
+                            round((closes.iloc[match_idx + 1] - closes.iloc[match_idx]) / closes.iloc[match_idx] * 100, 2)
+                            if bars_ago > 0 else np.nan
+                        ),
+                        "ema_at_match": round(float(ema.iloc[match_idx]), 2),
+                        "ema_last": round(float(ema.iloc[-1]), 2),
+                        "last_close": round(float(closes.iloc[-1]), 2),
+                    })
                 except Exception:
                     continue
         if progress_cb:
@@ -970,7 +1005,7 @@ if "universe_df" not in st.session_state:
     st.session_state.universe_meta = meta0
 
 with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_df is None)):
-    st.caption("The ticker list used by both scanners below. Filtered ONLY by market cap — refresh this occasionally (e.g. monthly), not every time you scan.")
+    st.caption("The ticker list used by the scanners below. Filtered ONLY by market cap — refresh this occasionally (e.g. monthly), not every time you scan.")
     if github_configured():
         st.caption("☁️ GitHub backup is configured — saves here are permanent.")
     else:
@@ -1477,7 +1512,12 @@ with tab_daily_ema_cross:
 # ========================= TAB 7: DAILY EMA TOUCH ============================
 
 with tab_touch:
-    st.markdown("Finds stocks where, within the recent N daily candles, price **touched the EMA** — no direction or strength requirement, just proximity.")
+    st.markdown(
+        "Finds stocks where price **touched the EMA** within the last N daily candles. "
+        "If the touch happened on the most recent candle, the stock is returned as-is (the bounce hasn't happened yet — watch it). "
+        "If the touch happened earlier, the **next immediate candle must have closed bullish** (a confirmed bounce) — "
+        "touches followed by further downside are filtered out as pullbacks turning into downtrends."
+    )
     with st.expander("⚙️ Rules", expanded=True):
         touch_ema_period = st.number_input("EMA period", min_value=1, value=25, step=1, key="t_ema_period")
         touch_lookback_candles = st.number_input("Must have happened within the last N daily candles", min_value=1, value=5, step=1, key="t_lookback")
@@ -1529,11 +1569,13 @@ with tab_touch:
             st.info("No matches found with the current rules.")
         else:
             st.success(f"Found {len(results_t)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "ema_at_match", "ema_last", "market_cap_b", "last_close"]
+            display_cols = ["symbol", "name", "exchange", "bars_ago", "match_time", "next_candle_bullish", "next_candle_pct", "ema_at_match", "ema_last", "market_cap_b", "last_close"]
             display_df = results_t[display_cols].rename(columns={
                 "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
-                "bars_ago": "Bars Ago", "match_time": "Match Date",
-                "ema_at_match": "EMA (at match)", "ema_last": "EMA (now)",
+                "bars_ago": "Bars Ago", "match_time": "Touch Date",
+                "next_candle_bullish": "Bounce? (next candle bullish)",
+                "next_candle_pct": "Next Candle %",
+                "ema_at_match": "EMA (at touch)", "ema_last": "EMA (now)",
                 "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
             })
             st.dataframe(display_df, use_container_width=True, hide_index=True)
