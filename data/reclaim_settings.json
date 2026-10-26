@@ -1,1 +1,1 @@
-{"fast_period": 10, "slow_period": 25, "timeframe": "1 hour", "lookback_candles": 7, "min_close_position_pct": 85.0}
+{"fast_period": 10, "slow_period": 25, "timeframe": "1 hour", "lookback_candles": 4, "min_close_position_pct": 85.0}
