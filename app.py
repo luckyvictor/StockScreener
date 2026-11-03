@@ -1,33 +1,29 @@
 """
-US Stock Screener — large-cap universe + seven pattern scanners
+US Stock Screener — large-cap universe + eight pattern scanners
 ----------------------------------------------------------------
 Two-layer design:
 
 1. Large-cap universe: a list of NASDAQ + NYSE tickers filtered ONLY by
-   market cap (default > $10B), fetched via Yahoo Finance's own bulk
-   screener and saved to disk. Refresh manually whenever you want
-   (monthly is plenty — market cap doesn't move fast).
+   market cap (default > $10B), fetched via Yahoo Finance's own bulk screener
+   and saved to disk. Refresh manually whenever you want (monthly is plenty —
+   market cap doesn't move fast).
 
 2. Pattern scanners read that saved list as-is and only apply their own
-   price-action rules — they do NOT re-check market cap. If no list has
-   been saved yet, a scanner will build one automatically (using the
-   current market cap threshold shown in the universe panel).
+   price-action rules — they do NOT re-check market cap. If no list has been
+   saved yet, a scanner will build one automatically (using the current
+   market cap threshold shown in the universe panel).
 
 Each scanner's results are saved separately and reload automatically on
 refresh. Charts are pulled from Finviz rather than plotted here.
 
-Run locally:
-    streamlit run app.py
+Run locally:      streamlit run app.py
+Deploy for phone use: push this folder to a GitHub repo and deploy for free
+                      on https://share.streamlit.io (Streamlit Community Cloud).
 
-Deploy for phone use:
-    push this folder to a GitHub repo and deploy for free on
-    https://share.streamlit.io (Streamlit Community Cloud).
-
-CONFIRMED-CANDLE MODE:
-    While the US market is OPEN, the last bar of any download (any
-    interval) is a still-forming candle. All scanners strip that forming
-    candle automatically, so every rule runs on confirmed, closed
-    candles only. When the market is closed, nothing is dropped.
+CONFIRMED-CANDLE MODE: While the US market is OPEN, the last bar of any
+download (any interval) is a still-forming candle. All scanners strip that
+forming candle automatically, so every rule runs on confirmed, closed
+candles only. When the market is closed, nothing is dropped.
 """
 
 import io
@@ -58,8 +54,10 @@ RESULTS_FILE_STACK = "last_scan_stack.json"
 RESULTS_FILE_RECLAIM = "last_scan_reclaim.json"
 RESULTS_FILE_DAILY_EMA_CROSS = "last_scan_daily_ema_cross.json"
 RESULTS_FILE_TOUCH = "last_scan_touch.json"
+RESULTS_FILE_RISING_SMA = "last_scan_rising_sma.json"
 LARGE_CAP_FILE = "large_cap_universe.json"
 RECLAIM_SETTINGS_FILE = "reclaim_settings.json"
+RISING_SMA_SETTINGS_FILE = "rising_sma_settings.json"
 GITHUB_DATA_DIR = "data"
 
 RECLAIM_TIMEFRAME_OPTIONS = {
@@ -242,8 +240,8 @@ def market_is_open():
 
 
 def strip_forming_candle(sub, ticker_label=""):
-    """If the market is currently open, the last bar is still forming — drop
-    it so all scanner logic runs on confirmed, closed candles only."""
+    """If the market is currently open, the last bar is still forming — drop it
+    so all scanner logic runs on confirmed, closed candles only."""
     if market_is_open() and sub is not None and not sub.empty:
         return sub.iloc[:-1]
     return sub
@@ -356,32 +354,29 @@ def build_large_cap_universe(min_cap_b):
         return fetch_large_cap_via_screener(min_cap_b), True
     except Exception as e:
         st.warning(f"Yahoo screener unavailable ({e}) — falling back to the full market list + per-ticker market cap check (much slower).")
-
-    full = get_full_symbol_list()
-    symbols = full["symbol"].tolist()
-    caps = {}
-    prog = st.progress(0.0)
-    for i, batch in enumerate(chunk(symbols, 50)):
-        batch_caps = get_market_caps(batch)
-        caps.update(batch_caps)
-        prog.progress(min((i + 1) * 50 / len(symbols), 1.0))
-    prog.empty()
-    full["market_cap"] = full["symbol"].map(caps)
-    full = full[full["market_cap"].fillna(0) >= min_cap_b * 1e9].copy()
-    full["market_cap_b"] = (full["market_cap"] / 1e9).round(2)
-    full = full.sort_values("market_cap", ascending=False).reset_index(drop=True)
-    return full, False
+        full = get_full_symbol_list()
+        symbols = full["symbol"].tolist()
+        caps = {}
+        prog = st.progress(0.0)
+        for i, batch in enumerate(chunk(symbols, 50)):
+            batch_caps = get_market_caps(batch)
+            caps.update(batch_caps)
+            prog.progress(min((i + 1) * 50 / len(symbols), 1.0))
+        prog.empty()
+        full["market_cap"] = full["symbol"].map(caps)
+        full = full[full["market_cap"].fillna(0) >= min_cap_b * 1e9].copy()
+        full["market_cap_b"] = (full["market_cap"] / 1e9).round(2)
+        full = full.sort_values("market_cap", ascending=False).reset_index(drop=True)
+        return full, False
 
 
 def ensure_universe_loaded():
     if st.session_state.get("universe_df") is not None and not st.session_state.universe_df.empty:
         return st.session_state.universe_df, st.session_state.universe_meta
-
     min_cap_b = st.session_state.get("u_mcap", 10.0)
     st.info(f"No saved large-cap list yet — building one now (market cap > ${min_cap_b:.0f}B). This only happens once; future scans will reuse the saved list.")
     with st.spinner("Fetching large-cap list..."):
         df, via_screener = build_large_cap_universe(min_cap_b)
-
     meta = {
         "built_at": datetime.now(timezone.utc).isoformat(),
         "min_cap_b": min_cap_b,
@@ -412,7 +407,6 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -426,7 +420,6 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
             )
         except Exception:
             data = None
-
         if data is not None and not data.empty:
             for t in batch:
                 try:
@@ -434,7 +427,6 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
                     if sub is None:
                         continue
                     sub = strip_forming_candle(sub, t)
-
                     closes = sub["Close"].dropna()
                     opens = sub["Open"].dropna()
                     highs = sub["High"].dropna()
@@ -442,13 +434,11 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
                     vols = sub["Volume"].dropna()
                     if len(closes) < 2 or len(opens) < 2 or len(highs) < 1 or len(lows) < 1:
                         continue
-
                     c_today, c_yesterday = closes.iloc[-1], closes.iloc[-2]
                     o_yesterday = opens.iloc[-2]
                     h_today, l_today = highs.iloc[-1], lows.iloc[-1]
                     if pd.isna(c_today) or pd.isna(c_yesterday) or pd.isna(o_yesterday) or pd.isna(h_today) or pd.isna(l_today):
                         continue
-
                     yesterday_pct = (c_yesterday - o_yesterday) / o_yesterday * 100
                     today_pct = (c_today - c_yesterday) / c_yesterday * 100
                     yesterday_ok = (c_yesterday < o_yesterday) if require_red_yesterday else True
@@ -456,7 +446,6 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
                     today_range = h_today - l_today
                     close_position = (c_today - l_today) / today_range if today_range > 0 else 1.0
                     close_position_ok = close_position >= min_close_position
-
                     if yesterday_ok and today_ok and close_position_ok:
                         matches.append({
                             "symbol": t,
@@ -470,7 +459,6 @@ def scan_daily_reversal(tickers, min_today_pct, require_red_yesterday, min_close
                     continue
         if progress_cb:
             progress_cb((i + 1) / total)
-
     return pd.DataFrame(matches)
 
 
@@ -482,7 +470,6 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -496,7 +483,6 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
             )
         except Exception:
             data = None
-
         if data is not None and not data.empty:
             for t in batch:
                 try:
@@ -504,25 +490,21 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
                     if sub is None:
                         continue
                     sub = strip_forming_candle(sub, t)
-
                     closes = sub["Close"].dropna()
                     highs = sub["High"].dropna()
                     lows = sub["Low"].dropna()
                     vols = sub["Volume"].dropna()
                     if len(closes) < 2 or len(highs) < 1 or len(lows) < 1:
                         continue
-
                     c_today, c_yesterday = closes.iloc[-1], closes.iloc[-2]
                     h_today, l_today = highs.iloc[-1], lows.iloc[-1]
                     if pd.isna(c_today) or pd.isna(c_yesterday) or pd.isna(h_today) or pd.isna(l_today):
                         continue
-
                     today_pct = (c_today - c_yesterday) / c_yesterday * 100
                     today_ok = today_pct >= min_today_pct
                     today_range = h_today - l_today
                     close_position = (c_today - l_today) / today_range if today_range > 0 else 1.0
                     close_position_ok = close_position >= min_close_position
-
                     if today_ok and close_position_ok:
                         matches.append({
                             "symbol": t,
@@ -535,7 +517,6 @@ def scan_strong_close_today(tickers, min_today_pct, min_close_position, batch_si
                     continue
         if progress_cb:
             progress_cb((i + 1) / total)
-
     return pd.DataFrame(matches)
 
 
@@ -548,7 +529,6 @@ def scan_ema_reclaim(tickers, lookback_candles, min_close_position, ema_fast, em
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
     min_bars_needed = ema_slow * 3 + lookback_candles + 11
-
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -562,7 +542,6 @@ def scan_ema_reclaim(tickers, lookback_candles, min_close_position, ema_fast, em
             )
         except Exception:
             data = None
-
         if data is not None and not data.empty:
             for t in batch:
                 try:
@@ -570,21 +549,17 @@ def scan_ema_reclaim(tickers, lookback_candles, min_close_position, ema_fast, em
                     if sub is None:
                         continue
                     sub = strip_forming_candle(sub, t)
-
                     closes = sub["Close"].dropna()
                     opens = sub["Open"].dropna()
                     highs = sub["High"].dropna()
                     lows = sub["Low"].dropna()
                     if min(len(closes), len(opens), len(highs), len(lows)) < min_bars_needed:
                         continue
-
                     ema_fast_s = closes.ewm(span=ema_fast, adjust=False).mean()
                     ema_slow_s = closes.ewm(span=ema_slow, adjust=False).mean()
-
                     n = len(closes)
                     lookback = min(lookback_candles, n)
                     start = n - lookback
-
                     match_idx = None
                     match_close_pos = None
                     for idx in range(n - 1, start - 1, -1):
@@ -600,7 +575,6 @@ def scan_ema_reclaim(tickers, lookback_candles, min_close_position, ema_fast, em
                             match_idx = idx
                             match_close_pos = close_pos
                             break
-
                     if match_idx is not None:
                         bars_ago = (n - 1) - match_idx
                         matches.append({
@@ -618,7 +592,6 @@ def scan_ema_reclaim(tickers, lookback_candles, min_close_position, ema_fast, em
                     continue
         if progress_cb:
             progress_cb((i + 1) / total)
-
     return pd.DataFrame(matches)
 
 
@@ -631,7 +604,6 @@ def scan_triple_ema_stack_cross(tickers, lookback_candles, clean_lookback_candle
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
     min_bars_needed = 90 + clean_lookback_candles + lookback_candles + 11
-
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -645,7 +617,6 @@ def scan_triple_ema_stack_cross(tickers, lookback_candles, clean_lookback_candle
             )
         except Exception:
             data = None
-
         if data is not None and not data.empty:
             for t in batch:
                 try:
@@ -653,20 +624,16 @@ def scan_triple_ema_stack_cross(tickers, lookback_candles, clean_lookback_candle
                     if sub is None:
                         continue
                     sub = strip_forming_candle(sub, t)
-
                     closes = sub["Close"].dropna()
                     if len(closes) < min_bars_needed:
                         continue
-
                     ema10 = closes.ewm(span=10, adjust=False).mean()
                     ema25 = closes.ewm(span=25, adjust=False).mean()
                     ema90 = closes.ewm(span=90, adjust=False).mean()
                     aligned = (ema10 > ema25) & (ema25 > ema90)
-
                     n = len(closes)
                     lookback = min(lookback_candles, n - 1)
                     start = n - lookback
-
                     match_idx = None
                     for idx in range(n - 1, start - 1, -1):
                         if not (aligned.iloc[idx] and not aligned.iloc[idx - 1]):
@@ -678,7 +645,6 @@ def scan_triple_ema_stack_cross(tickers, lookback_candles, clean_lookback_candle
                             continue
                         match_idx = idx
                         break
-
                     if match_idx is not None:
                         bars_ago = (n - 1) - match_idx
                         matches.append({
@@ -694,7 +660,6 @@ def scan_triple_ema_stack_cross(tickers, lookback_candles, clean_lookback_candle
                     continue
         if progress_cb:
             progress_cb((i + 1) / total)
-
     return pd.DataFrame(matches)
 
 
@@ -707,7 +672,6 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
     min_bars_needed = 90 + 21
-
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -721,7 +685,6 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
             )
         except Exception:
             data = None
-
         if data is not None and not data.empty:
             for t in batch:
                 try:
@@ -729,21 +692,17 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
                     if sub is None:
                         continue
                     sub = strip_forming_candle(sub, t)
-
                     closes = sub["Close"].dropna()
                     highs = sub["High"].dropna()
                     lows = sub["Low"].dropna()
                     if len(closes) < min_bars_needed or len(highs) < min_bars_needed or len(lows) < min_bars_needed:
                         continue
-
                     ema10 = closes.ewm(span=10, adjust=False).mean()
                     ema90 = closes.ewm(span=90, adjust=False).mean()
                     diff = ema10 - ema90
-
                     n = len(closes)
                     lookback = min(lookback_candles, n - 1)
                     start = n - lookback
-
                     match_idx = None
                     match_close_pos = None
                     for idx in range(n - 1, start - 1, -1):
@@ -756,7 +715,6 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
                             match_idx = idx
                             match_close_pos = close_pos
                             break
-
                     if match_idx is not None:
                         bars_ago = (n - 1) - match_idx
                         matches.append({
@@ -772,7 +730,6 @@ def scan_ema_trend_strong_candle(tickers, lookback_candles, min_close_position, 
                     continue
         if progress_cb:
             progress_cb((i + 1) / total)
-
     return pd.DataFrame(matches)
 
 
@@ -785,7 +742,6 @@ def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
     min_bars_needed = 200 + lookback_days + 11
-
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -799,7 +755,6 @@ def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_
             )
         except Exception:
             data = None
-
         if data is not None and not data.empty:
             for t in batch:
                 try:
@@ -807,26 +762,21 @@ def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_
                     if sub is None:
                         continue
                     sub = strip_forming_candle(sub, t)
-
                     closes = sub["Close"].dropna()
                     if len(closes) < min_bars_needed:
                         continue
-
                     ema10 = closes.ewm(span=10, adjust=False).mean()
                     ema200 = closes.ewm(span=200, adjust=False).mean()
                     diff = ema10 - ema200
-
                     n = len(closes)
                     lookback = min(lookback_days, n - 1)
                     start = n - lookback
-
                     match_idx = None
                     for idx in range(n - 1, start - 1, -1):
                         prev_diff, curr_diff = diff.iloc[idx - 1], diff.iloc[idx]
                         if prev_diff < 0 and curr_diff >= 0:
                             match_idx = idx
                             break
-
                     if match_idx is not None:
                         bars_ago = (n - 1) - match_idx
                         matches.append({
@@ -841,7 +791,6 @@ def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_
                     continue
         if progress_cb:
             progress_cb((i + 1) / total)
-
     return pd.DataFrame(matches)
 
 
@@ -850,9 +799,9 @@ def scan_daily_ema10_200_cross(tickers, lookback_days, batch_size=150, progress_
 # ----------------------------------------------------------------------------
 
 def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, progress_cb=None):
-    """Find tickers where, within the last `lookback_candles` CONFIRMED daily bars,
-    some candle's range contains the `ema_period`-day EMA (the EMA value sits between
-    that candle's low and high).
+    """Find tickers where, within the last `lookback_candles` CONFIRMED daily
+    bars, some candle's range contains the `ema_period`-day EMA (the EMA value
+    sits between that candle's low and high).
 
     Bounce filter: if the most recent touch happened on the latest candle
     (bars_ago == 0), the stock is returned as-is — the touch is fresh and any
@@ -865,10 +814,7 @@ def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, 
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-    # +2 extra: one for the possible forming-candle strip, one because we need
-    # the candle AFTER the touch to exist for the bounce check.
     min_bars_needed = ema_period * 3 + lookback_candles + 12
-
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -882,7 +828,6 @@ def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, 
             )
         except Exception:
             data = None
-
         if data is not None and not data.empty:
             for t in batch:
                 try:
@@ -890,46 +835,35 @@ def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, 
                     if sub is None:
                         continue
                     sub = strip_forming_candle(sub, t)
-
                     closes = sub["Close"].dropna()
                     opens = sub["Open"].dropna()
                     highs = sub["High"].dropna()
                     lows = sub["Low"].dropna()
                     if min(len(closes), len(opens), len(highs), len(lows)) < min_bars_needed:
                         continue
-
                     ema = closes.ewm(span=ema_period, adjust=False).mean()
-
                     n = len(closes)
                     lookback = min(lookback_candles, n)
                     start = n - lookback
-
                     match_idx = None
                     for idx in range(n - 1, start - 1, -1):
                         h, l, e = highs.iloc[idx], lows.iloc[idx], ema.iloc[idx]
                         if l <= e <= h:
                             match_idx = idx
                             break
-
                     if match_idx is None:
                         continue
-
                     bars_ago = (n - 1) - match_idx
-
-                    # Fresh touch (most recent confirmed candle): accept as-is,
-                    # the bounce hasn't had a chance to happen yet.
                     if bars_ago == 0:
-                        next_bullish = None  # no next candle yet
+                        next_bullish = None
                     else:
-                        # Bounce check: the immediate next candle must be bullish.
                         if match_idx + 1 >= n:
                             continue
                         next_open = opens.iloc[match_idx + 1]
                         next_close = closes.iloc[match_idx + 1]
                         next_bullish = bool(next_close > next_open)
                         if not next_bullish:
-                            continue  # touched EMA but kept falling — pullback, skip
-
+                            continue
                     matches.append({
                         "symbol": t,
                         "bars_ago": int(bars_ago),
@@ -947,7 +881,72 @@ def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, 
                     continue
         if progress_cb:
             progress_cb((i + 1) / total)
+    return pd.DataFrame(matches)
 
+
+# ----------------------------------------------------------------------------
+# Scanner: Rising SMA (NEW)
+# ----------------------------------------------------------------------------
+
+def scan_rising_sma(tickers, sma_period, lookback_days, require_every_day_rising=True, batch_size=150, progress_cb=None):
+    """Find tickers whose `sma_period`-day simple moving average has been
+    RISING over the past `lookback_days` confirmed daily bars.
+
+    Default rule: SMA(latest confirmed bar) > SMA(lookback_days bars ago).
+    Optional stricter rule (`require_every_day_rising`): the SMA must be
+    higher than the previous bar's SMA on EVERY one of the last
+    `lookback_days` days (monotonically increasing).
+    """
+    matches = []
+    batches = list(chunk(tickers, batch_size))
+    total = len(batches)
+    min_bars_needed = sma_period + lookback_days + 11
+    for i, batch in enumerate(batches):
+        try:
+            data = yf.download(
+                tickers=" ".join(batch),
+                period="2y",
+                interval="1d",
+                group_by="ticker",
+                threads=True,
+                progress=False,
+                auto_adjust=False,
+            )
+        except Exception:
+            data = None
+        if data is not None and not data.empty:
+            for t in batch:
+                try:
+                    sub = data if len(batch) == 1 else (data[t] if t in data.columns.get_level_values(0) else None)
+                    if sub is None:
+                        continue
+                    sub = strip_forming_candle(sub, t)
+                    closes = sub["Close"].dropna()
+                    if len(closes) < min_bars_needed:
+                        continue
+                    sma = closes.rolling(window=sma_period).mean()
+                    n = len(sma)
+                    lookback = min(lookback_days, n - sma_period)
+                    if lookback < 1:
+                        continue
+                    rising = sma.diff() > 0
+                    if require_every_day_rising:
+                        ok = bool(rising.iloc[n - lookback:].all())
+                    else:
+                        ok = bool(sma.iloc[-1] > sma.iloc[n - 1 - lookback])
+                    if ok:
+                        pct_change = (sma.iloc[-1] - sma.iloc[n - 1 - lookback]) / sma.iloc[n - 1 - lookback] * 100
+                        matches.append({
+                            "symbol": t,
+                            "sma_last": round(float(sma.iloc[-1]), 2),
+                            "sma_start": round(float(sma.iloc[n - 1 - lookback]), 2),
+                            "sma_change_pct": round(float(pct_change), 2),
+                            "last_close": round(float(closes.iloc[-1]), 2),
+                        })
+                except Exception:
+                    continue
+        if progress_cb:
+            progress_cb((i + 1) / total)
     return pd.DataFrame(matches)
 
 
@@ -1010,14 +1009,12 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
         st.caption("☁️ GitHub backup is configured — saves here are permanent.")
     else:
         st.caption("⚠️ GitHub backup not configured — saves only live in this app's temporary storage. See README to set it up.")
-
     u1, u2 = st.columns([3, 1.3])
     with u1:
         universe_min_cap_b = st.number_input("Market cap threshold ($B)", min_value=0.0, value=10.0, step=1.0, key="u_mcap")
     with u2:
         st.write("")
-    refresh_clicked = st.button("🔄 Refresh list", use_container_width=True)
-
+        refresh_clicked = st.button("🔄 Refresh list", use_container_width=True)
     if refresh_clicked:
         with st.spinner("Fetching large-cap list..."):
             df, via_screener = build_large_cap_universe(universe_min_cap_b)
@@ -1032,7 +1029,6 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
         st.session_state.universe_df = df
         st.session_state.universe_meta = meta
         st.success(f"Refreshed — {len(df):,} tickers saved." + (" ☁️ Backed up to GitHub." if synced else ""))
-
     if st.session_state.universe_df is not None and not st.session_state.universe_df.empty:
         m = st.session_state.universe_meta or {}
         built_at = m.get("built_at", "unknown")
@@ -1044,7 +1040,7 @@ with st.expander("🏢 Large-cap universe", expanded=(st.session_state.universe_
     else:
         st.caption("No saved list yet — one will be built automatically the first time you run a scan below, using the threshold set here (or tap Refresh list now).")
 
-tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack, tab_daily_ema_cross, tab_touch = st.tabs([
+tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack, tab_daily_ema_cross, tab_touch, tab_rising_sma = st.tabs([
     "🎯 EMA Reclaim",
     "📈 1H EMA Crossover",
     "📉 Daily Reversal",
@@ -1052,6 +1048,7 @@ tab_reclaim, tab_ema, tab_daily, tab_strong, tab_stack, tab_daily_ema_cross, tab
     "🧬 Triple EMA Stack",
     "🌅 Daily EMA10/200 Cross",
     "👆 Daily EMA Touch",
+    "🚀 Rising SMA",
 ])
 
 # ========================= TAB 1: EMA RECLAIM =================================
@@ -1085,6 +1082,7 @@ with tab_reclaim:
         f"and closes strong above both** on the **{reclaim_timeframe}** timeframe. Must have happened within the last "
         f"{reclaim_lookback_candles} candles. Scanned from the large-cap universe above."
     )
+
     run_reclaim = st.button(f"🔍 Run EMA{reclaim_fast_period}/{reclaim_slow_period} Reclaim scan", type="primary", use_container_width=True, key="run_reclaim")
 
     if "reclaim_results" not in st.session_state:
@@ -1115,7 +1113,6 @@ with tab_reclaim:
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
-
         rules_used = {
             "fast_period": reclaim_fast_period,
             "slow_period": reclaim_slow_period,
@@ -1124,7 +1121,6 @@ with tab_reclaim:
             "min_close_position_pct": min_reclaim_close_position_pct,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
-
         if matches.empty:
             st.session_state.reclaim_results = pd.DataFrame()
             save_results(RESULTS_FILE_RECLAIM, pd.DataFrame(), rules_used)
@@ -1140,7 +1136,6 @@ with tab_reclaim:
     if results_r is not None and not results_r.empty and st.session_state.get("reclaim_saved_at"):
         saved_dt = datetime.fromisoformat(st.session_state.reclaim_saved_at)
         st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
     if results_r is not None:
         if results_r.empty:
             st.info("No matches found with the current rules.")
@@ -1172,6 +1167,7 @@ with tab_ema:
             help="On the matching candle, the close must sit at least this far up that candle's own low-to-high range.",
         )
         st.caption("Uses ~2 months of hourly data so the 90-period EMA has enough history to be meaningful.")
+
     run_ema = st.button("🔍 Run 1H EMA scan", type="primary", use_container_width=True, key="run_ema")
 
     if "ema_results" not in st.session_state:
@@ -1191,13 +1187,11 @@ with tab_ema:
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
-
         rules_used = {
             "lookback_candles": lookback_candles,
             "min_close_position_pct": min_ema_close_position_pct,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
-
         if matches.empty:
             st.session_state.ema_results = pd.DataFrame()
             save_results(RESULTS_FILE_EMA, pd.DataFrame(), rules_used)
@@ -1213,7 +1207,6 @@ with tab_ema:
     if results_e is not None and not results_e.empty and st.session_state.get("ema_saved_at"):
         saved_dt = datetime.fromisoformat(st.session_state.ema_saved_at)
         st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
     if results_e is not None:
         if results_e.empty:
             st.info("No matches found with the current rules.")
@@ -1244,6 +1237,7 @@ with tab_daily:
             min_value=0.0, max_value=100.0, value=60.0, step=5.0, key="d_close_pos",
             help="Today's close must sit at least this far up today's low-to-high range.",
         )
+
     run_daily = st.button("🔍 Run Daily Reversal scan", type="primary", use_container_width=True, key="run_daily")
 
     if "daily_results" not in st.session_state:
@@ -1264,14 +1258,12 @@ with tab_daily:
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
-
         rules_used = {
             "require_red_yesterday": require_red_yesterday,
             "min_today_pct": min_today_pct,
             "min_close_position_pct": min_close_position_pct,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
-
         if matches.empty:
             st.session_state.daily_results = pd.DataFrame()
             save_results(RESULTS_FILE_DAILY, pd.DataFrame(), rules_used)
@@ -1287,7 +1279,6 @@ with tab_daily:
     if results_d is not None and not results_d.empty and st.session_state.get("daily_saved_at"):
         saved_dt = datetime.fromisoformat(st.session_state.daily_saved_at)
         st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
     if results_d is not None:
         if results_d.empty:
             st.info("No matches found with the current rules.")
@@ -1316,6 +1307,7 @@ with tab_strong:
             min_value=0.0, max_value=100.0, value=80.0, step=5.0, key="s_close_pos",
             help="Today's close must sit at least this far up today's low-to-high range.",
         )
+
     run_strong = st.button("🔍 Run Strong Close scan", type="primary", use_container_width=True, key="run_strong")
 
     if "strong_results" not in st.session_state:
@@ -1335,13 +1327,11 @@ with tab_strong:
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
-
         rules_used = {
             "min_today_pct": min_strong_today_pct,
             "min_close_position_pct": min_strong_close_position_pct,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
-
         if matches.empty:
             st.session_state.strong_results = pd.DataFrame()
             save_results(RESULTS_FILE_STRONG, pd.DataFrame(), rules_used)
@@ -1357,7 +1347,6 @@ with tab_strong:
     if results_s is not None and not results_s.empty and st.session_state.get("strong_saved_at"):
         saved_dt = datetime.fromisoformat(st.session_state.strong_saved_at)
         st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
     if results_s is not None:
         if results_s.empty:
             st.info("No matches found with the current rules.")
@@ -1386,6 +1375,7 @@ with tab_stack:
             help="Counting back from the candle where alignment forms, none of these prior candles may have already had EMA10 > EMA25 > EMA90.",
         )
         st.caption("Uses ~3 months of hourly data so there's enough history for both lookback windows plus a stable 90-period EMA.")
+
     run_stack = st.button("🔍 Run Triple EMA Stack scan", type="primary", use_container_width=True, key="run_stack")
 
     if "stack_results" not in st.session_state:
@@ -1405,13 +1395,11 @@ with tab_stack:
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
-
         rules_used = {
             "lookback_candles": stack_lookback_candles,
             "clean_lookback_candles": stack_clean_lookback_candles,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
-
         if matches.empty:
             st.session_state.stack_results = pd.DataFrame()
             save_results(RESULTS_FILE_STACK, pd.DataFrame(), rules_used)
@@ -1427,7 +1415,6 @@ with tab_stack:
     if results_k is not None and not results_k.empty and st.session_state.get("stack_saved_at"):
         saved_dt = datetime.fromisoformat(st.session_state.stack_saved_at)
         st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
     if results_k is not None:
         if results_k.empty:
             st.info("No matches found with the current rules.")
@@ -1452,6 +1439,7 @@ with tab_daily_ema_cross:
     with st.expander("⚙️ Rules", expanded=True):
         daily_ema_lookback_days = st.number_input("Crossover must have happened within the last N daily bars", min_value=1, value=25, step=1, key="de_lookback")
         st.caption("Uses ~2 years of daily data so the 200-day EMA has enough history to be meaningful.")
+
     run_daily_ema_cross = st.button("🔍 Run Daily EMA10/200 Cross scan", type="primary", use_container_width=True, key="run_daily_ema_cross")
 
     if "daily_ema_cross_results" not in st.session_state:
@@ -1470,12 +1458,10 @@ with tab_daily_ema_cross:
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
-
         rules_used = {
             "lookback_days": daily_ema_lookback_days,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
-
         if matches.empty:
             st.session_state.daily_ema_cross_results = pd.DataFrame()
             save_results(RESULTS_FILE_DAILY_EMA_CROSS, pd.DataFrame(), rules_used)
@@ -1491,7 +1477,6 @@ with tab_daily_ema_cross:
     if results_de is not None and not results_de.empty and st.session_state.get("daily_ema_cross_saved_at"):
         saved_dt = datetime.fromisoformat(st.session_state.daily_ema_cross_saved_at)
         st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
     if results_de is not None:
         if results_de.empty:
             st.info("No matches found with the current rules.")
@@ -1522,6 +1507,7 @@ with tab_touch:
         touch_ema_period = st.number_input("EMA period", min_value=1, value=25, step=1, key="t_ema_period")
         touch_lookback_candles = st.number_input("Must have happened within the last N daily candles", min_value=1, value=5, step=1, key="t_lookback")
         st.caption("Uses ~2 years of daily data so the EMA has enough history to be meaningful.")
+
     run_touch = st.button(f"🔍 Run Daily EMA{touch_ema_period} Touch scan", type="primary", use_container_width=True, key="run_touch")
 
     if "touch_results" not in st.session_state:
@@ -1541,13 +1527,11 @@ with tab_touch:
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
-
         rules_used = {
             "ema_period": touch_ema_period,
             "lookback_candles": touch_lookback_candles,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
-
         if matches.empty:
             st.session_state.touch_results = pd.DataFrame()
             save_results(RESULTS_FILE_TOUCH, pd.DataFrame(), rules_used)
@@ -1563,7 +1547,6 @@ with tab_touch:
     if results_t is not None and not results_t.empty and st.session_state.get("touch_saved_at"):
         saved_dt = datetime.fromisoformat(st.session_state.touch_saved_at)
         st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
-
     if results_t is not None:
         if results_t.empty:
             st.info("No matches found with the current rules.")
@@ -1573,8 +1556,7 @@ with tab_touch:
             display_df = results_t[display_cols].rename(columns={
                 "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
                 "bars_ago": "Bars Ago", "match_time": "Touch Date",
-                "next_candle_bullish": "Bounce? (next candle bullish)",
-                "next_candle_pct": "Next Candle %",
+                "next_candle_bullish": "Bounce? (next candle bullish)", "next_candle_pct": "Next Candle %",
                 "ema_at_match": "EMA (at touch)", "ema_last": "EMA (now)",
                 "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
             })
@@ -1582,3 +1564,90 @@ with tab_touch:
             render_charts(results_t.sort_values("market_cap_b", ascending=False), key_prefix="touch")
     else:
         st.info("Set your rules above and tap **Run Daily EMA Touch scan**.")
+
+# ========================= TAB 8: RISING SMA (NEW) ===========================
+
+with tab_rising_sma:
+    st.markdown(
+        "Finds stocks whose **SMA has been rising** over the past N days. "
+        "By default this means SMA(today) > SMA(N days ago). Optionally require the SMA to be "
+        "**higher than the previous bar's SMA on every single day** of the lookback (strictly monotonic rise)."
+    )
+    with st.expander("⚙️ Rules", expanded=True):
+        if "rs_period" not in st.session_state:
+            saved_settings = load_scanner_settings(RISING_SMA_SETTINGS_FILE) or {}
+            st.session_state["rs_period"] = saved_settings.get("sma_period", 200)
+            st.session_state["rs_lookback"] = saved_settings.get("lookback_days", 10)
+            st.session_state["rs_every_day"] = saved_settings.get("require_every_day_rising", True)
+
+        rising_sma_period = st.number_input("SMA period (days)", min_value=1, value=200, step=5, key="rs_period")
+        rising_sma_lookback = st.number_input("Must have been rising over the past N days", min_value=1, value=10, step=1, key="rs_lookback")
+        rising_sma_every_day = st.checkbox(
+            "Strict: must rise every single day of the lookback",
+            value=True, key="rs_every_day",
+            help="If checked, the SMA must be above the previous day's SMA on every one of the last N days. "
+                 "If unchecked, only the endpoints are compared (SMA now vs. SMA N days ago).",
+        )
+        st.caption("Uses ~2 years of daily data so a 200-day SMA has enough history to be meaningful.")
+
+    run_rising_sma = st.button(f"🔍 Run Rising SMA{rising_sma_period} scan", type="primary", use_container_width=True, key="run_rising_sma")
+
+    if "rising_sma_results" not in st.session_state:
+        df0, saved_at0, rules0 = load_results(RESULTS_FILE_RISING_SMA)
+        st.session_state.rising_sma_results = df0
+        st.session_state.rising_sma_saved_at = saved_at0
+
+    if run_rising_sma:
+        save_scanner_settings(RISING_SMA_SETTINGS_FILE, {
+            "sma_period": rising_sma_period,
+            "lookback_days": rising_sma_lookback,
+            "require_every_day_rising": rising_sma_every_day,
+        })
+        universe, universe_meta = ensure_universe_loaded()
+        tickers = universe["symbol"].tolist()
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the daily chart for a rising SMA{rising_sma_period}...")
+        progress = st.progress(0.0)
+        matches = scan_rising_sma(
+            tickers,
+            sma_period=rising_sma_period,
+            lookback_days=rising_sma_lookback,
+            require_every_day_rising=rising_sma_every_day,
+            progress_cb=lambda p: progress.progress(p),
+        )
+        progress.empty()
+        rules_used = {
+            "sma_period": rising_sma_period,
+            "lookback_days": rising_sma_lookback,
+            "require_every_day_rising": rising_sma_every_day,
+            "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
+        }
+        if matches.empty:
+            st.session_state.rising_sma_results = pd.DataFrame()
+            save_results(RESULTS_FILE_RISING_SMA, pd.DataFrame(), rules_used)
+        else:
+            matches = finalize_matches(matches, universe, sort_col="sma_change_pct", sort_asc=False)
+            st.session_state.rising_sma_results = matches
+            synced = save_results(RESULTS_FILE_RISING_SMA, matches, rules_used)
+            if synced:
+                st.caption("☁️ Results backed up to GitHub.")
+        st.session_state.rising_sma_saved_at = datetime.now(timezone.utc).isoformat()
+
+    results_rs = st.session_state.rising_sma_results
+    if results_rs is not None and not results_rs.empty and st.session_state.get("rising_sma_saved_at"):
+        saved_dt = datetime.fromisoformat(st.session_state.rising_sma_saved_at)
+        st.caption(f"🕒 Showing saved results from **{saved_dt.strftime('%Y-%m-%d %H:%M UTC')}**. Tap **Run scan** to refresh.")
+    if results_rs is not None:
+        if results_rs.empty:
+            st.info("No matches found with the current rules.")
+        else:
+            st.success(f"Found {len(results_rs)} match(es).")
+            display_cols = ["symbol", "name", "exchange", "sma_last", "sma_start", "sma_change_pct", "market_cap_b", "last_close"]
+            display_df = results_rs[display_cols].rename(columns={
+                "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
+                "sma_last": "SMA (now)", "sma_start": f"SMA ({rising_sma_lookback}d ago)",
+                "sma_change_pct": "SMA Change %", "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            render_charts(results_rs.sort_values("market_cap_b", ascending=False), key_prefix="rising_sma")
+    else:
+        st.info("Set your rules above and tap **Run Rising SMA scan**.")
