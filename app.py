@@ -888,19 +888,23 @@ def scan_daily_ema_touch(tickers, lookback_candles, ema_period, batch_size=150, 
 # Scanner: Rising SMA (NEW)
 # ----------------------------------------------------------------------------
 
-def scan_rising_sma(tickers, sma_period, lookback_days, require_every_day_rising=True, batch_size=150, progress_cb=None):
-    """Find tickers whose `sma_period`-day simple moving average has been
+
+def scan_rising_ma(tickers, ma_period, lookback_days, ma_type="sma", require_every_day_rising=True, batch_size=150, progress_cb=None):
+    """Find tickers whose `ma_period`-day moving average (SMA or EMA) has been
     RISING over the past `lookback_days` confirmed daily bars.
 
-    Default rule: SMA(latest confirmed bar) > SMA(lookback_days bars ago).
-    Optional stricter rule (`require_every_day_rising`): the SMA must be
-    higher than the previous bar's SMA on EVERY one of the last
+    ma_type: "sma" (simple moving average, rolling mean) or "ema"
+             (exponential moving average, same as the other scanners use).
+
+    Default rule: MA(latest confirmed bar) > MA(lookback_days bars ago).
+    Optional stricter rule (`require_every_day_rising`): the MA must be
+    higher than the previous bar's MA on EVERY one of the last
     `lookback_days` days (monotonically increasing).
     """
     matches = []
     batches = list(chunk(tickers, batch_size))
     total = len(batches)
-    min_bars_needed = sma_period + lookback_days + 11
+    min_bars_needed = ma_period + lookback_days + 11
     for i, batch in enumerate(batches):
         try:
             data = yf.download(
@@ -924,23 +928,27 @@ def scan_rising_sma(tickers, sma_period, lookback_days, require_every_day_rising
                     closes = sub["Close"].dropna()
                     if len(closes) < min_bars_needed:
                         continue
-                    sma = closes.rolling(window=sma_period).mean()
-                    n = len(sma)
-                    lookback = min(lookback_days, n - sma_period)
+                    if ma_type == "ema":
+                        ma = closes.ewm(span=ma_period, adjust=False).mean()
+                    else:
+                        ma = closes.rolling(window=ma_period).mean()
+                    n = len(ma)
+                    lookback = min(lookback_days, n - 1)
                     if lookback < 1:
                         continue
-                    rising = sma.diff() > 0
+                    rising = ma.diff() > 0
                     if require_every_day_rising:
                         ok = bool(rising.iloc[n - lookback:].all())
                     else:
-                        ok = bool(sma.iloc[-1] > sma.iloc[n - 1 - lookback])
+                        ok = bool(ma.iloc[-1] > ma.iloc[n - 1 - lookback])
                     if ok:
-                        pct_change = (sma.iloc[-1] - sma.iloc[n - 1 - lookback]) / sma.iloc[n - 1 - lookback] * 100
+                        pct_change = (ma.iloc[-1] - ma.iloc[n - 1 - lookback]) / ma.iloc[n - 1 - lookback] * 100
                         matches.append({
                             "symbol": t,
-                            "sma_last": round(float(sma.iloc[-1]), 2),
-                            "sma_start": round(float(sma.iloc[n - 1 - lookback]), 2),
-                            "sma_change_pct": round(float(pct_change), 2),
+                            "ma_type": ma_type.upper(),
+                            "ma_last": round(float(ma.iloc[-1]), 2),
+                            "ma_start": round(float(ma.iloc[n - 1 - lookback]), 2),
+                            "ma_change_pct": round(float(pct_change), 2),
                             "last_close": round(float(closes.iloc[-1]), 2),
                         })
                 except Exception:
@@ -948,7 +956,6 @@ def scan_rising_sma(tickers, sma_period, lookback_days, require_every_day_rising
         if progress_cb:
             progress_cb((i + 1) / total)
     return pd.DataFrame(matches)
-
 
 # ----------------------------------------------------------------------------
 # Shared UI helpers
@@ -1567,65 +1574,74 @@ with tab_touch:
 
 # ========================= TAB 8: RISING SMA (NEW) ===========================
 
+# ========================= TAB 8: RISING MA ==================================
+
 with tab_rising_sma:
     st.markdown(
-        "Finds stocks whose **SMA has been rising** over the past N days. "
-        "By default this means SMA(today) > SMA(N days ago). Optionally require the SMA to be "
-        "**higher than the previous bar's SMA on every single day** of the lookback (strictly monotonic rise)."
+        "Finds stocks whose **moving average (SMA or EMA) has been rising** over the past N days. "
+        "By default this means MA(today) > MA(N days ago). Optionally require the MA to be "
+        "**higher than the previous bar's MA on every single day** of the lookback (strictly monotonic rise)."
     )
     with st.expander("⚙️ Rules", expanded=True):
         if "rs_period" not in st.session_state:
             saved_settings = load_scanner_settings(RISING_SMA_SETTINGS_FILE) or {}
-            st.session_state["rs_period"] = saved_settings.get("sma_period", 200)
+            st.session_state["rs_period"] = saved_settings.get("ma_period", 200)
             st.session_state["rs_lookback"] = saved_settings.get("lookback_days", 10)
+            st.session_state["rs_ma_type"] = saved_settings.get("ma_type", "SMA")
             st.session_state["rs_every_day"] = saved_settings.get("require_every_day_rising", True)
 
-        rising_sma_period = st.number_input("SMA period (days)", min_value=1, value=200, step=5, key="rs_period")
-        rising_sma_lookback = st.number_input("Must have been rising over the past N days", min_value=1, value=10, step=1, key="rs_lookback")
-        rising_sma_every_day = st.checkbox(
+        rising_ma_type = st.selectbox("Moving average type", ["SMA", "EMA"], key="rs_ma_type",
+                                      help="SMA = simple moving average (rolling mean). EMA = exponential moving average, reacts faster to recent prices.")
+        rising_ma_period = st.number_input("MA period (days)", min_value=1, value=200, step=5, key="rs_period")
+        rising_ma_lookback = st.number_input("Must have been rising over the past N days", min_value=1, value=10, step=1, key="rs_lookback")
+        rising_ma_every_day = st.checkbox(
             "Strict: must rise every single day of the lookback",
             value=True, key="rs_every_day",
-            help="If checked, the SMA must be above the previous day's SMA on every one of the last N days. "
-                 "If unchecked, only the endpoints are compared (SMA now vs. SMA N days ago).",
+            help="If checked, the MA must be above the previous day's MA on every one of the last N days. "
+                 "If unchecked, only the endpoints are compared (MA now vs. MA N days ago).",
         )
-        st.caption("Uses ~2 years of daily data so a 200-day SMA has enough history to be meaningful.")
+        st.caption("Uses ~2 years of daily data so a 200-day MA has enough history to be meaningful.")
 
-    run_rising_sma = st.button(f"🔍 Run Rising SMA{rising_sma_period} scan", type="primary", use_container_width=True, key="run_rising_sma")
+    ma_type_key = rising_ma_type.lower()
+    run_rising_ma = st.button(f"🔍 Run Rising {rising_ma_type}{rising_ma_period} scan", type="primary", use_container_width=True, key="run_rising_ma")
 
     if "rising_sma_results" not in st.session_state:
         df0, saved_at0, rules0 = load_results(RESULTS_FILE_RISING_SMA)
         st.session_state.rising_sma_results = df0
         st.session_state.rising_sma_saved_at = saved_at0
 
-    if run_rising_sma:
+    if run_rising_ma:
         save_scanner_settings(RISING_SMA_SETTINGS_FILE, {
-            "sma_period": rising_sma_period,
-            "lookback_days": rising_sma_lookback,
-            "require_every_day_rising": rising_sma_every_day,
+            "ma_type": rising_ma_type,
+            "ma_period": rising_ma_period,
+            "lookback_days": rising_ma_lookback,
+            "require_every_day_rising": rising_ma_every_day,
         })
         universe, universe_meta = ensure_universe_loaded()
         tickers = universe["symbol"].tolist()
-        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the daily chart for a rising SMA{rising_sma_period}...")
+        st.write(f"Scanning **{len(tickers):,}** large-cap tickers on the daily chart for a rising {rising_ma_type}{rising_ma_period}...")
         progress = st.progress(0.0)
-        matches = scan_rising_sma(
+        matches = scan_rising_ma(
             tickers,
-            sma_period=rising_sma_period,
-            lookback_days=rising_sma_lookback,
-            require_every_day_rising=rising_sma_every_day,
+            ma_period=rising_ma_period,
+            lookback_days=rising_ma_lookback,
+            ma_type=ma_type_key,
+            require_every_day_rising=rising_ma_every_day,
             progress_cb=lambda p: progress.progress(p),
         )
         progress.empty()
         rules_used = {
-            "sma_period": rising_sma_period,
-            "lookback_days": rising_sma_lookback,
-            "require_every_day_rising": rising_sma_every_day,
+            "ma_type": rising_ma_type,
+            "ma_period": rising_ma_period,
+            "lookback_days": rising_ma_lookback,
+            "require_every_day_rising": rising_ma_every_day,
             "universe_min_cap_b": universe_meta.get("min_cap_b") if universe_meta else None,
         }
         if matches.empty:
             st.session_state.rising_sma_results = pd.DataFrame()
             save_results(RESULTS_FILE_RISING_SMA, pd.DataFrame(), rules_used)
         else:
-            matches = finalize_matches(matches, universe, sort_col="sma_change_pct", sort_asc=False)
+            matches = finalize_matches(matches, universe, sort_col="ma_change_pct", sort_asc=False)
             st.session_state.rising_sma_results = matches
             synced = save_results(RESULTS_FILE_RISING_SMA, matches, rules_used)
             if synced:
@@ -1641,13 +1657,13 @@ with tab_rising_sma:
             st.info("No matches found with the current rules.")
         else:
             st.success(f"Found {len(results_rs)} match(es).")
-            display_cols = ["symbol", "name", "exchange", "sma_last", "sma_start", "sma_change_pct", "market_cap_b", "last_close"]
+            display_cols = ["symbol", "name", "exchange", "ma_type", "ma_last", "ma_start", "ma_change_pct", "market_cap_b", "last_close"]
             display_df = results_rs[display_cols].rename(columns={
                 "symbol": "Ticker", "name": "Company", "exchange": "Exchange",
-                "sma_last": "SMA (now)", "sma_start": f"SMA ({rising_sma_lookback}d ago)",
-                "sma_change_pct": "SMA Change %", "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
+                "ma_type": "MA Type", "ma_last": "MA (now)", "ma_start": f"MA ({rising_ma_lookback}d ago)",
+                "ma_change_pct": "MA Change %", "market_cap_b": "Mkt Cap ($B)", "last_close": "Last Close",
             })
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             render_charts(results_rs.sort_values("market_cap_b", ascending=False), key_prefix="rising_sma")
     else:
-        st.info("Set your rules above and tap **Run Rising SMA scan**.")
+        st.info("Set your rules above and tap **Run Rising MA scan**.")
